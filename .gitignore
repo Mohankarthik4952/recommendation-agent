@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment files
+.env
+.env.*
+*.local
+
+# Build output
+build/
+dist/
+out/
+coverage/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.python-version
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+tmp/
+tmp-debug.js
+*.tmp
+
+# Local database / generated assets
+*.sqlite
+*.sqlite3
+
+# Optional large generated model artifacts if you do not want to commit them
+# model.joblib
+# *.joblib
+
+# Local package archives
+*.zip

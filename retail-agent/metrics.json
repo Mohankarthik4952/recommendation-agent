@@ -1,0 +1,27 @@
+{
+  "accuracy": 0.8129,
+  "precision": 0.0495,
+  "recall": 0.1484,
+  "f1_score": 0.0742,
+  "roc_auc": 0.4862,
+  "baseline_majority_class_accuracy": 0.9495,
+  "test_set_size": 30000,
+  "positive_rate_in_test": 0.0505,
+  "confusion_matrix": {
+    "labels": [
+      "actual_no_purchase",
+      "actual_purchase"
+    ],
+    "matrix": [
+      [
+        24161,
+        4323
+      ],
+      [
+        1291,
+        225
+      ]
+    ]
+  },
+  "note": "EDA showed near-zero correlation between every feature and the purchase label in this dataset (all feature-level purchase rates cluster around the ~5% base rate). ROC-AUC close to 0.5 here is the expected, honest result of that -- it confirms the model isn't finding a real relationship because the dataset largely does not contain one, not because of a modeling error. Accuracy alone would look artificially high (~95%) simply by predicting the majority class -- that's why precision/recall/F1/ROC-AUC are reported alongside it."
+}

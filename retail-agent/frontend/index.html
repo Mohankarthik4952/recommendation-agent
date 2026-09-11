@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Personalized Retail Recommendation Agent</title>
+<style>
+  :root {
+    --primary: #0d9488;
+    --primary-dark: #0f766e;
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --text: #1e293b;
+    --muted: #64748b;
+    --border: #e2e8f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 32px 16px;
+  }
+  .container { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 24px; font-size: 14px; }
+  .controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    background: var(--card);
+    padding: 16px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  select, button {
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    font-size: 14px;
+  }
+  button {
+    background: var(--primary);
+    color: white;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  button:hover { background: var(--primary-dark); }
+  .profile-panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    color: var(--muted);
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+  .profile-panel b { color: var(--text); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .card h3 { margin: 0 0 4px; font-size: 16px; }
+  .why {
+    font-size: 13px;
+    color: var(--text);
+    background: #f0fdfa;
+    border-left: 3px solid var(--primary);
+    padding: 8px 10px;
+    border-radius: 4px;
+    margin-top: 8px;
+  }
+  .score-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+  .empty { color: var(--muted); padding: 24px; text-align: center; }
+  .metrics-panel {
+    margin-top: 24px;
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 13px;
+    color: #7c2d12;
+  }
+  .metrics-panel b { display: block; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🛍️ Personalized Retail Recommendation Agent</h1>
+  <div class="subtitle">Select a customer to see personalized category/brand recommendations, grounded in their real interaction history.</div>
+
+  <div class="controls">
+    <select id="userSelect"><option>Loading users...</option></select>
+    <button id="recommendBtn">Get Recommendations</button>
+  </div>
+
+  <div class="profile-panel" id="profilePanel" style="display:none;"></div>
+
+  <div class="cards" id="cards">
+    <div class="empty">Select a customer and click "Get Recommendations" to begin.</div>
+  </div>
+
+  <div class="metrics-panel" id="metricsPanel"></div>
+</div>
+
+<script>
+  // Change this if your backend runs on a different host/port
+  const API_BASE = "http://localhost:8000";
+
+  const userSelect = document.getElementById("userSelect");
+  const profilePanel = document.getElementById("profilePanel");
+  const cardsEl = document.getElementById("cards");
+  const metricsPanel = document.getElementById("metricsPanel");
+
+  async function loadUsers() {
+    try {
+      const res = await fetch(`${API_BASE}/users?limit=200`);
+      const users = await res.json();
+      userSelect.innerHTML = users
+        .map(u => `<option value="${u.user_id}">${u.user_id} (${u.interaction_count} interactions)</option>`)
+        .join("");
+    } catch (e) {
+      userSelect.innerHTML = `<option>Backend not reachable at ${API_BASE}</option>`;
+    }
+  }
+
+  async function getRecommendations() {
+    const uid = userSelect.value;
+    if (!uid) return;
+    cardsEl.innerHTML = `<div class="empty">Loading recommendations...</div>`;
+    try {
+      const res = await fetch(`${API_BASE}/recommend/${uid}?top_k=5`);
+      const data = await res.json();
+
+      const p = data.profile_snapshot;
+      profilePanel.style.display = "flex";
+      profilePanel.innerHTML = `
+        <div><b>${data.user_id}</b></div>
+        <div>Age: <b>${p.age}</b></div>
+        <div>Gender: <b>${p.gender}</b></div>
+        <div>Loyalty score: <b>${p.loyalty_score}</b></div>
+        <div>Past purchases: <b>${p.previous_purchase_count}</b></div>
+        <div>Total interactions: <b>${data.total_interactions}</b> (${data.total_purchases} purchases)</div>
+      `;
+
+      if (!data.recommendations || data.recommendations.length === 0) {
+        cardsEl.innerHTML = `<div class="empty">No recommendations found for this user.</div>`;
+        return;
+      }
+      cardsEl.innerHTML = data.recommendations.map(r => `
+        <div class="card">
+          <h3>${r.category} <span style="color:var(--muted); font-weight: 400;">× ${r.brand}</span></h3>
+          <div class="why">💡 ${r.explanation}</div>
+          <div class="score-row">
+            <span>Affinity: ${r.affinity_score}</span>
+            <span>Predicted conversion: ${(r.predicted_purchase_probability * 100).toFixed(1)}%</span>
+          </div>
+        </div>
+      `).join("");
+    } catch (e) {
+      cardsEl.innerHTML = `<div class="empty">Error fetching recommendations: ${e}</div>`;
+    }
+  }
+
+  async function loadMetrics() {
+    try {
+      const res = await fetch(`${API_BASE}/metrics`);
+      const m = await res.json();
+      metricsPanel.innerHTML = `<b>Purchase-propensity model evaluation (honest report)</b>
+        Accuracy: ${m.accuracy} | Precision: ${m.precision} | Recall: ${m.recall} | F1: ${m.f1_score} | ROC-AUC: ${m.roc_auc}
+        <br/><span style="font-size:12px;">${m.note}</span>`;
+    } catch (e) {
+      metricsPanel.innerHTML = "";
+    }
+  }
+
+  document.getElementById("recommendBtn").addEventListener("click", getRecommendations);
+
+  loadUsers();
+  loadMetrics();
+</script>
+</body>
+</html>
