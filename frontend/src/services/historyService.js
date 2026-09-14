@@ -1,50 +1,94 @@
 import api from "./api";
 
 // ============================================================
-// GET PURCHASE HISTORY
+// HISTORY SERVICE
 // ============================================================
 
+/**
+ * Get purchase history
+ *
+ * Actual API endpoint:
+ * GET /api/history/:customerId/purchases
+ */
 export const getPurchaseHistory = async (customerId) => {
   if (!customerId) {
     throw new Error("Customer ID is required");
   }
 
-  const response = await api.get(
-    `/history/${encodeURIComponent(customerId)}/purchases`,
-  );
+  try {
+    const response = await api.get(
+      `/history/${encodeURIComponent(customerId)}/purchases`,
+    );
 
-  return response.data;
+    return response.data;
+  } catch (error) {
+    console.error(
+      `Failed to load purchase history for ${customerId}:`,
+      error.response?.data?.message || error.message,
+    );
+
+    throw error;
+  }
 };
 
-// ============================================================
-// GET BROWSING HISTORY
-// ============================================================
-
+/**
+ * Get browsing history
+ *
+ * Actual API endpoint:
+ * GET /api/history/:customerId/browsing
+ */
 export const getBrowsingHistory = async (customerId) => {
   if (!customerId) {
     throw new Error("Customer ID is required");
   }
 
-  const response = await api.get(
-    `/history/${encodeURIComponent(customerId)}/browsing`,
-  );
+  try {
+    const response = await api.get(
+      `/history/${encodeURIComponent(customerId)}/browsing`,
+    );
 
-  return response.data;
+    return response.data;
+  } catch (error) {
+    console.error(
+      `Failed to load browsing history for ${customerId}:`,
+      error.response?.data?.message || error.message,
+    );
+
+    throw error;
+  }
 };
 
-// ============================================================
-// RECORD PRODUCT VIEW
-// ============================================================
-
+/**
+ * Record product view
+ *
+ * Actual API endpoint:
+ * POST /api/history/view
+ */
 export const recordProductView = async ({ productId, duration = null }) => {
   if (!productId) {
     throw new Error("Product ID is required");
   }
 
-  const response = await api.post("/history/view", {
-    productId,
-    duration,
-  });
+  try {
+    const response = await api.post("/history/view", {
+      productId,
+      duration,
+    });
 
-  return response.data;
+    return response.data;
+  } catch (error) {
+    console.error(
+      `Failed to record product view for ${productId}:`,
+      error.response?.data?.message || error.message,
+    );
+
+    throw error;
+  }
 };
+
+// ============================================================
+// ALIASES
+// ============================================================
+
+export const fetchPurchaseHistory = getPurchaseHistory;
+export const fetchBrowsingHistory = getBrowsingHistory;
