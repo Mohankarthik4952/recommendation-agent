@@ -22,15 +22,23 @@ const findProductByCategoryAndBrand = async (category, brand) => {
 };
 
 const fetchRecommendationsFromMl = async (customerId) => {
-  const response = await axios.get(
-    `${ML_SERVICE_URL}/recommend/${encodeURIComponent(customerId)}`,
-    {
-      params: { top_k: 5 },
-      timeout: 20000,
-    },
-  );
+  try {
+    const response = await axios.get(
+      `${ML_SERVICE_URL}/recommend/${encodeURIComponent(customerId)}`,
+      {
+        params: { top_k: 5 },
+        timeout: 20000,
+      },
+    );
 
-  return response.data;
+    return response.data;
+  } catch (error) {
+    if (error?.response?.status === 404) {
+      return { recommendations: [] };
+    }
+
+    throw error;
+  }
 };
 
 const saveRecommendationsForCustomer = async (

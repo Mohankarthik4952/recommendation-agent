@@ -241,9 +241,9 @@ function ProductDetails() {
             ================================================== */}
 
             <div className="product-details-image">
-              {product.image ? (
+              {product.image || product.image_url ? (
                 <img
-                  src={product.image}
+                  src={product.image || product.image_url}
                   alt={product.name}
                   onError={(event) => {
                     event.currentTarget.style.display = "none";

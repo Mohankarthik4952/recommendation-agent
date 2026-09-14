@@ -150,6 +150,29 @@ function Dashboard() {
     );
   }
 
+  const statCards = [
+    {
+      icon: "✨",
+      label: "Match Score",
+      value: `${Math.max(0, Math.min(100, Number(customer?.loyalty_score ?? 0)))}%`,
+    },
+    {
+      icon: "🛍️",
+      label: "Products Viewed",
+      value: Number(customer?.products_viewed ?? 0),
+    },
+    {
+      icon: "❤️",
+      label: "Saved Items",
+      value: Number(customer?.saved_items ?? 0),
+    },
+    {
+      icon: "🛒",
+      label: "Purchases",
+      value: Number(customer?.previous_purchase_count ?? 0),
+    },
+  ];
+
   // ============================================================
   // DASHBOARD
   // ============================================================
@@ -197,45 +220,17 @@ function Dashboard() {
           ================================================== */}
 
           <section className="stats-grid">
-            <div className="stat-card">
-              <div className="stat-icon">✨</div>
+            {statCards.map((stat) => (
+              <div className="stat-card" key={stat.label}>
+                <div className="stat-icon">{stat.icon}</div>
 
-              <div>
-                <span>Match Score</span>
+                <div>
+                  <span>{stat.label}</span>
 
-                <strong>94%</strong>
+                  <strong>{stat.value}</strong>
+                </div>
               </div>
-            </div>
-
-            <div className="stat-card">
-              <div className="stat-icon">🛍️</div>
-
-              <div>
-                <span>Products Viewed</span>
-
-                <strong>24</strong>
-              </div>
-            </div>
-
-            <div className="stat-card">
-              <div className="stat-icon">❤️</div>
-
-              <div>
-                <span>Saved Items</span>
-
-                <strong>8</strong>
-              </div>
-            </div>
-
-            <div className="stat-card">
-              <div className="stat-icon">🛒</div>
-
-              <div>
-                <span>Purchases</span>
-
-                <strong>12</strong>
-              </div>
-            </div>
+            ))}
           </section>
 
           {/* ==================================================

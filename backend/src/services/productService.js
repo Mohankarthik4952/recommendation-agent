@@ -11,6 +11,7 @@ const getAllProducts = async () => {
       price,
       discount,
       rating,
+      image_url,
       image_url AS image,
       stock,
       season
@@ -33,6 +34,7 @@ const getProductById = async (id) => {
       price,
       discount,
       rating,
+      image_url,
       image_url AS image,
       stock,
       season

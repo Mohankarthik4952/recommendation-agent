@@ -81,6 +81,10 @@ const login = async (req, res) => {
         age: customer.age,
         gender: customer.gender,
         location: customer.location,
+        loyalty_score: customer.loyalty_score ?? 0,
+        previous_purchase_count: customer.previous_purchase_count ?? 0,
+        avg_purchase_value: customer.avg_purchase_value ?? 0,
+        created_at: customer.created_at,
       },
     });
   } catch (error) {
