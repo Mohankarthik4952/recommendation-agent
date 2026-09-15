@@ -8,6 +8,7 @@ Recommendation signals:
 4. Seasonal relevance
 5. Discount / offer relevance
 6. Stock availability
+7. Recommendation feedback
 
 The recommendation engine uses category + brand behavioral affinity because
 the source dataset does not provide stable product-level identity suitable
@@ -15,6 +16,14 @@ for classic item-based collaborative filtering.
 
 The ML purchase-propensity model is treated as a secondary signal because
 its predictive performance on the supplied dataset is weak.
+
+Recommendation feedback is used as a real-time personalization signal.
+Helpful feedback increases the relevance of related products/categories/brands,
+while not-helpful feedback decreases their relevance.
+
+Important:
+The ML dataset does not contain a stock column. Real stock availability is
+handled by the Node.js backend against the PostgreSQL products table.
 """
 
 import json
@@ -24,7 +33,11 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from db import get_customer, get_customer_interactions
+from db import (
+    get_customer,
+    get_customer_interactions,
+    get_customer_recommendation_feedback,
+)
 
 
 # ============================================================
@@ -61,6 +74,16 @@ DISCOUNT_WEIGHT = 0.10
 
 
 # ============================================================
+# FEEDBACK SETTINGS
+# ============================================================
+
+FEEDBACK_ADJUSTMENT_WEIGHT = 0.05
+
+HELPFUL_VALUE = 1.0
+NOT_HELPFUL_VALUE = -1.0
+
+
+# ============================================================
 # MODEL CACHE
 # ============================================================
 
@@ -93,7 +116,11 @@ def list_users(df, limit=200):
     Return a manageable sample of user summaries for a UI dropdown.
     """
 
-    counts = df.groupby("user_id").size().sort_values(ascending=False)
+    counts = (
+        df.groupby("user_id")
+        .size()
+        .sort_values(ascending=False)
+    )
 
     top_users = counts.head(limit).index.tolist()
 
@@ -111,11 +138,16 @@ def list_users(df, limit=200):
         ]
     )
 
-    latest["interaction_count"] = latest.user_id.map(counts)
+    latest["interaction_count"] = latest.user_id.map(
+        counts
+    )
 
     return (
         latest
-        .sort_values("interaction_count", ascending=False)
+        .sort_values(
+            "interaction_count",
+            ascending=False,
+        )
         .to_dict(orient="records")
     )
 
@@ -154,9 +186,11 @@ def _customer_history_frame(customer_id):
     df["user_age"] = profile["user_age"]
     df["user_gender"] = profile["user_gender"]
     df["loyalty_score"] = profile["loyalty_score"]
+
     df["previous_purchase_count"] = profile[
         "previous_purchase_count"
     ]
+
     df["avg_purchase_value"] = profile[
         "avg_purchase_value"
     ]
@@ -176,7 +210,9 @@ def _customer_history_frame(customer_id):
 # ============================================================
 
 def recommend_for_customer(customer_id, top_k=5):
-    profile, df = _customer_history_frame(customer_id)
+    profile, df = _customer_history_frame(
+        customer_id
+    )
 
     if profile is None:
         return {
@@ -233,10 +269,6 @@ def _affinity_scores(hist, field):
 # ============================================================
 
 def _latest_profile(hist):
-    """
-    Latest observed customer profile snapshot.
-    """
-
     return (
         hist
         .sort_values("timestamp")
@@ -250,14 +282,12 @@ def _latest_profile(hist):
 
 def _current_season():
     """
-    Determine the current broad shopping season.
-
     India-oriented seasonal grouping:
 
-    March-May       -> Summer
-    June-September  -> Monsoon
-    October-November-> Festive
-    December-Feb    -> Winter
+    March-May        -> Summer
+    June-September   -> Monsoon
+    October-November -> Festive
+    December-Feb     -> Winter
     """
 
     month = pd.Timestamp.now().month
@@ -278,13 +308,21 @@ def _current_season():
 # SEASONAL RELEVANCE
 # ============================================================
 
-def _season_relevance(product_season, current_season):
+def _season_relevance(
+    product_season,
+    current_season,
+):
     """
     Return a normalized seasonal relevance score.
     """
 
-    season = str(product_season or "").strip().lower()
-    current = str(current_season or "").strip().lower()
+    season = str(
+        product_season or ""
+    ).strip().lower()
+
+    current = str(
+        current_season or ""
+    ).strip().lower()
 
     if not season:
         return 0.0
@@ -295,16 +333,29 @@ def _season_relevance(product_season, current_season):
     if season == current:
         return 1.0
 
-    # Useful mappings for common product season labels.
     seasonal_groups = {
-        "summer": {"summer", "travel"},
-        "monsoon": {"monsoon", "rainy"},
-        "festive": {"festive", "festival"},
-        "winter": {"winter"},
+        "summer": {
+            "summer",
+            "travel",
+        },
+        "monsoon": {
+            "monsoon",
+            "rainy",
+        },
+        "festive": {
+            "festive",
+            "festival",
+        },
+        "winter": {
+            "winter",
+        },
     }
 
     for group_name, values in seasonal_groups.items():
-        if current == group_name and season in values:
+        if (
+            current == group_name
+            and season in values
+        ):
             return 1.0
 
     return 0.0
@@ -314,21 +365,235 @@ def _season_relevance(product_season, current_season):
 # DISCOUNT SCORE
 # ============================================================
 
-def _discount_score(discount, max_discount):
+def _discount_score(
+    discount,
+    max_discount,
+):
     """
     Convert product discount into a normalized score.
     """
 
     try:
-        discount = float(discount or 0)
-        max_discount = float(max_discount or 0)
-    except (TypeError, ValueError):
+        discount = float(
+            discount or 0
+        )
+
+        max_discount = float(
+            max_discount or 0
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
         return 0.0
 
-    if discount <= 0 or max_discount <= 0:
+    if (
+        discount <= 0
+        or max_discount <= 0
+    ):
         return 0.0
 
-    return min(discount / max_discount, 1.0)
+    return min(
+        discount / max_discount,
+        1.0,
+    )
+
+
+# ============================================================
+# FEEDBACK HELPERS
+# ============================================================
+
+def _feedback_value(action):
+    """
+    Convert feedback action into a numeric signal.
+
+    helpful     -> +1
+    not_helpful -> -1
+    """
+
+    action = str(
+        action or ""
+    ).strip().lower()
+
+    if action == "helpful":
+        return HELPFUL_VALUE
+
+    if action == "not_helpful":
+        return NOT_HELPFUL_VALUE
+
+    return 0.0
+
+
+def _build_feedback_profile(feedback_rows):
+    """
+    Build normalized feedback signals for:
+
+    1. Exact product
+    2. Category
+    3. Brand
+
+    Repeated feedback for the same entity is averaged.
+    """
+
+    product_values = {}
+    category_values = {}
+    brand_values = {}
+
+    for row in feedback_rows:
+
+        value = _feedback_value(
+            row.get("action")
+        )
+
+        if value == 0:
+            continue
+
+        product_id = row.get(
+            "product_id"
+        )
+
+        category = row.get(
+            "category"
+        )
+
+        brand = row.get(
+            "brand"
+        )
+
+        # ----------------------------------------------------
+        # Product feedback
+        # ----------------------------------------------------
+
+        if product_id:
+            product_values.setdefault(
+                str(product_id),
+                [],
+            ).append(value)
+
+        # ----------------------------------------------------
+        # Category feedback
+        # ----------------------------------------------------
+
+        if category:
+            category_values.setdefault(
+                str(category),
+                [],
+            ).append(value)
+
+        # ----------------------------------------------------
+        # Brand feedback
+        # ----------------------------------------------------
+
+        if brand:
+            brand_values.setdefault(
+                str(brand),
+                [],
+            ).append(value)
+
+    # --------------------------------------------------------
+    # Average product feedback
+    # --------------------------------------------------------
+
+    product_scores = {
+        key: float(
+            np.mean(values)
+        )
+        for key, values in product_values.items()
+        if values
+    }
+
+    # --------------------------------------------------------
+    # Average category feedback
+    # --------------------------------------------------------
+
+    category_scores = {
+        key: float(
+            np.mean(values)
+        )
+        for key, values in category_values.items()
+        if values
+    }
+
+    # --------------------------------------------------------
+    # Average brand feedback
+    # --------------------------------------------------------
+
+    brand_scores = {
+        key: float(
+            np.mean(values)
+        )
+        for key, values in brand_values.items()
+        if values
+    }
+
+    return {
+        "product": product_scores,
+        "category": category_scores,
+        "brand": brand_scores,
+    }
+
+
+def _feedback_score(
+    product_id,
+    category,
+    brand,
+    feedback_profile,
+):
+    """
+    Calculate feedback relevance for a candidate.
+
+    Exact product  -> 50%
+    Category       -> 30%
+    Brand          -> 20%
+    """
+
+    product_scores = feedback_profile.get(
+        "product",
+        {},
+    )
+
+    category_scores = feedback_profile.get(
+        "category",
+        {},
+    )
+
+    brand_scores = feedback_profile.get(
+        "brand",
+        {},
+    )
+
+    product_signal = float(
+        product_scores.get(
+            str(product_id),
+            0.0,
+        )
+    )
+
+    category_signal = float(
+        category_scores.get(
+            str(category),
+            0.0,
+        )
+    )
+
+    brand_signal = float(
+        brand_scores.get(
+            str(brand),
+            0.0,
+        )
+    )
+
+    score = (
+        product_signal * 0.50
+        + category_signal * 0.30
+        + brand_signal * 0.20
+    )
+
+    return max(
+        -1.0,
+        min(score, 1.0),
+    )
 
 
 # ============================================================
@@ -346,35 +611,58 @@ def _propensity_score(
     search_keyword,
 ):
     """
-    Run the existing purchase-propensity model
-    for one recommendation candidate.
+    Run the existing purchase-propensity model.
     """
 
     model = _get_model()
 
     row = {
-        "price": float(price or 0),
-        "discount": float(discount or 0),
-        "user_age": profile_row["user_age"],
-        "loyalty_score": profile_row["loyalty_score"],
+        "price": float(
+            price or 0
+        ),
+
+        "discount": float(
+            discount or 0
+        ),
+
+        "user_age": profile_row[
+            "user_age"
+        ],
+
+        "loyalty_score": profile_row[
+            "loyalty_score"
+        ],
+
         "previous_purchase_count": profile_row[
             "previous_purchase_count"
         ],
+
         "avg_purchase_value": profile_row[
             "avg_purchase_value"
         ],
+
         "product_category": category,
+
         "brand": brand,
+
         "device_type": device_type,
+
         "location": location,
-        "user_gender": profile_row["user_gender"],
+
+        "user_gender": profile_row[
+            "user_gender"
+        ],
+
         "search_keywords": search_keyword,
     }
 
     batch = pd.DataFrame([row])
 
     try:
-        probability = model.predict_proba(batch)[0][1]
+        probability = model.predict_proba(
+            batch
+        )[0][1]
+
         return float(probability)
 
     except Exception:
@@ -417,32 +705,48 @@ def _build_candidate_pairs(df):
 # MAIN RECOMMENDATION ENGINE
 # ============================================================
 
-def recommend_for_user(user_id, top_k=5, df=None):
+def recommend_for_user(
+    user_id,
+    top_k=5,
+    df=None,
+):
 
     if df is None:
         df = load_dataset()
 
-    hist = _user_history(df, user_id)
+    hist = _user_history(
+        df,
+        user_id,
+    )
 
     if hist.empty:
         return {
-            "error": f"user_id {user_id} not found"
+            "error": (
+                f"user_id {user_id} not found"
+            )
         }
 
     profile = _latest_profile(hist)
 
     # --------------------------------------------------------
     # Behavioral affinity
+    #
+    # IMPORTANT:
+    # Keep these Series unchanged.
     # --------------------------------------------------------
 
-    cat_affinity = _affinity_scores(
-        hist,
-        "product_category",
+    category_affinity_scores = (
+        _affinity_scores(
+            hist,
+            "product_category",
+        )
     )
 
-    brand_affinity = _affinity_scores(
-        hist,
-        "brand",
+    brand_affinity_scores = (
+        _affinity_scores(
+            hist,
+            "brand",
+        )
     )
 
     # --------------------------------------------------------
@@ -518,16 +822,51 @@ def recommend_for_user(user_id, top_k=5, df=None):
     )
 
     # --------------------------------------------------------
+    # Customer feedback
+    # --------------------------------------------------------
+
+    feedback_rows = (
+        get_customer_recommendation_feedback(
+            user_id
+        )
+    )
+
+    feedback_profile = (
+        _build_feedback_profile(
+            feedback_rows
+        )
+    )
+
+    # --------------------------------------------------------
+    # Feedback statistics
+    # --------------------------------------------------------
+
+    helpful_count = sum(
+        1
+        for row in feedback_rows
+        if row.get("action") == "helpful"
+    )
+
+    not_helpful_count = sum(
+        1
+        for row in feedback_rows
+        if row.get("action") == "not_helpful"
+    )
+
+    # --------------------------------------------------------
     # Purchased category/brand combinations
     # --------------------------------------------------------
 
     purchased = hist[
-        hist["interaction_type"] == "purchase"
+        hist["interaction_type"]
+        == "purchase"
     ]
 
     purchased_pairs = set(
         zip(
-            purchased["product_category"],
+            purchased[
+                "product_category"
+            ],
             purchased["brand"],
         )
     )
@@ -536,7 +875,9 @@ def recommend_for_user(user_id, top_k=5, df=None):
     # Candidate combinations
     # --------------------------------------------------------
 
-    pairs = _build_candidate_pairs(df)
+    pairs = _build_candidate_pairs(
+        df
+    )
 
     candidates = []
 
@@ -546,24 +887,37 @@ def recommend_for_user(user_id, top_k=5, df=None):
         # Skip combinations already purchased
         # ----------------------------------------------------
 
-        if (category, brand) in purchased_pairs:
+        if (
+            category,
+            brand,
+        ) in purchased_pairs:
             continue
 
         # ----------------------------------------------------
         # Affinity
+        #
+        # IMPORTANT:
+        # Use separate local variables so we don't overwrite
+        # the original Pandas Series.
         # ----------------------------------------------------
 
-        category_affinity = float(
-            cat_affinity.get(category, 0)
+        category_affinity_value = float(
+            category_affinity_scores.get(
+                category,
+                0,
+            )
         )
 
-        brand_affinity = float(
-            brand_affinity.get(brand, 0)
+        brand_affinity_value = float(
+            brand_affinity_scores.get(
+                brand,
+                0,
+            )
         )
 
         affinity_score = (
-            category_affinity * 0.60
-            + brand_affinity * 0.40
+            category_affinity_value * 0.60
+            + brand_affinity_value * 0.40
         )
 
         # ----------------------------------------------------
@@ -571,51 +925,102 @@ def recommend_for_user(user_id, top_k=5, df=None):
         # ----------------------------------------------------
 
         matching_products = df[
-            (df["product_category"] == category)
-            & (df["brand"] == brand)
+            (
+                df["product_category"]
+                == category
+            )
+            & (
+                df["brand"]
+                == brand
+            )
         ].copy()
 
         if matching_products.empty:
             continue
 
-        # Only recommend combinations with
-        # products that have stock.
-        in_stock = matching_products[
-            pd.to_numeric(
-                matching_products["stock"],
-                errors="coerce",
-            ).fillna(0) > 0
-        ]
+        # ----------------------------------------------------
+        # IMPORTANT:
+        #
+        # The ML CSV does not contain stock.
+        #
+        # Stock is checked later by the Node.js backend
+        # against the PostgreSQL products table.
+        # ----------------------------------------------------
 
-        if in_stock.empty:
+        available_products = (
+            matching_products.copy()
+        )
+
+        if available_products.empty:
             continue
 
-        # Prefer products with higher discount.
-        in_stock = in_stock.copy()
+        # ----------------------------------------------------
+        # Prefer products with higher discounts and ratings.
+        # ----------------------------------------------------
 
-        in_stock["discount_numeric"] = (
+        available_products[
+            "discount_numeric"
+        ] = (
             pd.to_numeric(
-                in_stock["discount"],
+                available_products[
+                    "discount"
+                ],
                 errors="coerce",
             )
             .fillna(0)
         )
 
-        in_stock = (
-            in_stock
+        if "rating" in available_products.columns:
+
+            available_products[
+                "rating_numeric"
+            ] = (
+                pd.to_numeric(
+                    available_products[
+                        "rating"
+                    ],
+                    errors="coerce",
+                )
+                .fillna(0)
+            )
+
+            sort_columns = [
+                "discount_numeric",
+                "rating_numeric",
+            ]
+
+        else:
+
+            sort_columns = [
+                "discount_numeric",
+            ]
+
+        available_products = (
+            available_products
             .sort_values(
-                [
-                    "discount_numeric",
-                    "rating",
-                ],
+                sort_columns,
                 ascending=False,
             )
         )
 
-        representative = in_stock.iloc[0]
+        representative = (
+            available_products.iloc[0]
+        )
+
+        # ----------------------------------------------------
+        # Representative product values
+        # ----------------------------------------------------
+
+        product_id = representative.get(
+            "product_id",
+            None,
+        )
 
         price = float(
-            representative.get("price", 0)
+            representative.get(
+                "price",
+                0,
+            )
             or 0
         )
 
@@ -666,18 +1071,58 @@ def recommend_for_user(user_id, top_k=5, df=None):
         )
 
         # ----------------------------------------------------
-        # Final recommendation score
+        # Feedback signal
+        # ----------------------------------------------------
+
+        feedback_score = _feedback_score(
+            product_id,
+            category,
+            brand,
+            feedback_profile,
+        )
+
+        # ----------------------------------------------------
+        # Existing recommendation score
+        # ----------------------------------------------------
+
+        base_score = (
+            affinity_score
+            * AFFINITY_WEIGHT
+
+            + propensity
+            * PROPENSITY_WEIGHT
+
+            + season_score
+            * SEASON_WEIGHT
+
+            + discount_score
+            * DISCOUNT_WEIGHT
+        )
+
+        # ----------------------------------------------------
+        # Feedback adjustment
+        # ----------------------------------------------------
+
+        feedback_adjustment = (
+            feedback_score
+            * FEEDBACK_ADJUSTMENT_WEIGHT
+        )
+
+        # ----------------------------------------------------
+        # Final score
         # ----------------------------------------------------
 
         final_score = (
-            affinity_score
-            * AFFINITY_WEIGHT
-            + propensity
-            * PROPENSITY_WEIGHT
-            + season_score
-            * SEASON_WEIGHT
-            + discount_score
-            * DISCOUNT_WEIGHT
+            base_score
+            + feedback_adjustment
+        )
+
+        final_score = max(
+            0.0,
+            min(
+                final_score,
+                1.0,
+            ),
         )
 
         # ----------------------------------------------------
@@ -686,16 +1131,25 @@ def recommend_for_user(user_id, top_k=5, df=None):
 
         category_interactions = int(
             (
-                hist["product_category"]
+                hist[
+                    "product_category"
+                ]
                 == category
             ).sum()
         )
 
         category_purchases = int(
             (
-                (hist["product_category"] == category)
+                (
+                    hist[
+                        "product_category"
+                    ]
+                    == category
+                )
                 & (
-                    hist["interaction_type"]
+                    hist[
+                        "interaction_type"
+                    ]
                     == "purchase"
                 )
             ).sum()
@@ -715,6 +1169,7 @@ def recommend_for_user(user_id, top_k=5, df=None):
         reasons = []
 
         if category_interactions > 0:
+
             category_reason = (
                 f"you've engaged with "
                 f"{category} products "
@@ -722,31 +1177,56 @@ def recommend_for_user(user_id, top_k=5, df=None):
             )
 
             if category_purchases > 0:
+
                 category_reason += (
                     f" ({category_purchases} purchases)"
                 )
 
-            reasons.append(category_reason)
+            reasons.append(
+                category_reason
+            )
 
         if brand_interactions > 0:
+
             reasons.append(
                 f"you've interacted with "
-                f"{brand} {brand_interactions} times"
+                f"{brand} "
+                f"{brand_interactions} times"
             )
 
         if season_score >= 1.0:
+
             reasons.append(
                 f"it's relevant for the "
-                f"current {current_season.lower()} season"
+                f"current "
+                f"{current_season.lower()} "
+                f"season"
             )
 
         if discount > 0:
+
             reasons.append(
                 f"it currently has a "
                 f"{discount:g}% discount"
             )
 
+        if feedback_score > 0:
+
+            reasons.append(
+                "your previous feedback "
+                "indicates you prefer "
+                "similar products"
+            )
+
+        elif feedback_score < 0:
+
+            reasons.append(
+                "your previous feedback "
+                "reduced its relevance"
+            )
+
         if not reasons:
+
             reasons.append(
                 "it matches available products "
                 "with current stock"
@@ -754,7 +1234,7 @@ def recommend_for_user(user_id, top_k=5, df=None):
 
         explanation = (
             "Recommended because "
-            + ", and ".join(reasons)
+            + ", ".join(reasons)
             + "."
         )
 
@@ -764,32 +1244,82 @@ def recommend_for_user(user_id, top_k=5, df=None):
 
         candidates.append(
             {
+                "product_id": product_id,
+
                 "category": category,
+
                 "brand": brand,
-                "price": round(price, 2),
-                "discount": round(discount, 2),
+
+                "price": round(
+                    price,
+                    2,
+                ),
+
+                "discount": round(
+                    discount,
+                    2,
+                ),
+
                 "season": product_season,
+
                 "current_season": current_season,
+
                 "affinity_score": round(
-                    float(affinity_score),
+                    float(
+                        affinity_score
+                    ),
                     4,
                 ),
+
                 "predicted_purchase_probability": round(
-                    float(propensity),
+                    float(
+                        propensity
+                    ),
                     4,
                 ),
+
                 "seasonal_relevance": round(
-                    float(season_score),
+                    float(
+                        season_score
+                    ),
                     4,
                 ),
+
                 "discount_score": round(
-                    float(discount_score),
+                    float(
+                        discount_score
+                    ),
                     4,
                 ),
+
+                "feedback_score": round(
+                    float(
+                        feedback_score
+                    ),
+                    4,
+                ),
+
+                "feedback_adjustment": round(
+                    float(
+                        feedback_adjustment
+                    ),
+                    4,
+                ),
+
+                "base_score": round(
+                    float(
+                        base_score
+                    ),
+                    4,
+                ),
+
                 "final_score": round(
-                    float(final_score),
+                    float(
+                        final_score
+                    ),
                     4,
                 ),
+
                 "explanation": explanation,
             }
         )
@@ -799,7 +1329,9 @@ def recommend_for_user(user_id, top_k=5, df=None):
     # ========================================================
 
     candidates.sort(
-        key=lambda x: x["final_score"],
+        key=lambda x: x[
+            "final_score"
+        ],
         reverse=True,
     )
 
@@ -814,22 +1346,30 @@ def recommend_for_user(user_id, top_k=5, df=None):
 
         "profile_snapshot": {
             "note": (
-                "most recent observed row for this user"
+                "most recent observed row "
+                "for this user"
             ),
+
             "age": int(
                 profile["user_age"]
             ),
+
             "gender": profile[
                 "user_gender"
             ],
+
             "loyalty_score": float(
-                profile["loyalty_score"]
+                profile[
+                    "loyalty_score"
+                ]
             ),
+
             "previous_purchase_count": int(
                 profile[
                     "previous_purchase_count"
                 ]
             ),
+
             "avg_purchase_value": round(
                 float(
                     profile[
@@ -846,16 +1386,34 @@ def recommend_for_user(user_id, top_k=5, df=None):
 
         "total_purchases": n_purchases,
 
+        # ----------------------------------------------------
+        # Feedback summary
+        # ----------------------------------------------------
+
+        "feedback_summary": {
+            "total": len(
+                feedback_rows
+            ),
+
+            "helpful": helpful_count,
+
+            "not_helpful": not_helpful_count,
+        },
+
         "top_categories": (
-            cat_affinity
-            .sort_values(ascending=False)
+            category_affinity_scores
+            .sort_values(
+                ascending=False
+            )
             .head(3)
             .to_dict()
         ),
 
         "top_brands": (
-            brand_affinity
-            .sort_values(ascending=False)
+            brand_affinity_scores
+            .sort_values(
+                ascending=False
+            )
             .head(3)
             .to_dict()
         ),
@@ -874,6 +1432,7 @@ def get_model_metrics():
         METRICS_PATH,
         encoding="utf-8",
     ) as f:
+
         return json.load(f)
 
 

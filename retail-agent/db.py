@@ -95,9 +95,69 @@ def get_customer_interactions(customer_id):
                     "price": float(row[5] or 0),
                     "discount": float(row[6] or 0),
                     "search_keywords": row[7],
-                    "rating": float(row[8]) if row[8] is not None else None,
+                    "rating": (
+                        float(row[8])
+                        if row[8] is not None
+                        else None
+                    ),
                     "category": row[9],
                     "brand": row[10],
+                }
+                for row in rows
+            ]
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# GET CUSTOMER RECOMMENDATION FEEDBACK
+# ============================================================
+
+def get_customer_recommendation_feedback(customer_id):
+    """
+    Retrieve recommendation feedback submitted by a customer.
+
+    The feedback table contains:
+        customer_id
+        recommendation_id
+        product_id
+        action
+        created_at
+    """
+
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    rf.recommendation_id,
+                    rf.product_id,
+                    rf.action,
+                    rf.created_at,
+                    p.category,
+                    p.brand
+                FROM recommendation_feedback rf
+                LEFT JOIN products p
+                    ON rf.product_id = p.id
+                WHERE rf.customer_id = %s
+                ORDER BY rf.created_at
+                """,
+                (customer_id,),
+            )
+
+            rows = cur.fetchall()
+
+            return [
+                {
+                    "recommendation_id": row[0],
+                    "product_id": row[1],
+                    "action": row[2],
+                    "created_at": row[3],
+                    "category": row[4],
+                    "brand": row[5],
                 }
                 for row in rows
             ]

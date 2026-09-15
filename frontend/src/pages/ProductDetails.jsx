@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import "../index.css";
@@ -27,6 +27,18 @@ function ProductDetails() {
 
   const [saved, setSaved] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
+
+  // ============================================================
+  // PRODUCT VIEW TRACKING
+  // ============================================================
+  // Prevents the same product view from being recorded twice
+  // when React Strict Mode re-runs effects during development.
+  //
+  // The key contains both customer ID and product ID so that
+  // changing to another product still records a new view.
+  // ============================================================
+
+  const viewRecordedRef = useRef(null);
 
   // ============================================================
   // LOAD PRODUCT
@@ -82,6 +94,20 @@ function ProductDetails() {
       return;
     }
 
+    const viewKey = `${customer.id}:${id}`;
+
+    // ----------------------------------------------------------
+    // Prevent duplicate recording
+    // ----------------------------------------------------------
+
+    if (viewRecordedRef.current === viewKey) {
+      return;
+    }
+
+    // Mark this customer/product combination as recorded
+    // before making the request.
+    viewRecordedRef.current = viewKey;
+
     const recordView = async () => {
       try {
         await recordProductView({
@@ -92,6 +118,9 @@ function ProductDetails() {
         // Notify Dashboard that a new view was recorded.
         window.dispatchEvent(new Event("dashboardStatsUpdated"));
       } catch (err) {
+        // If the API request failed, allow a retry.
+        viewRecordedRef.current = null;
+
         // Viewing a product should never break the page.
         console.error("Failed to record product view:", err);
       }
