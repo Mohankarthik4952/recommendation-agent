@@ -8,13 +8,18 @@ import ProductCard from "../components/ProductCard";
 
 import { getProducts } from "../services/productService";
 import { getRecommendations } from "../services/recommendationService";
+import { getDashboardStats } from "../services/historyService";
 
 import { useAuth } from "../context/AuthContext";
 
 function Dashboard() {
   const navigate = useNavigate();
 
-  const { customer, loading: authLoading, token: authToken } = useAuth();
+  const { customer, loading: authLoading } = useAuth();
+
+  // ============================================================
+  // STATE
+  // ============================================================
 
   const [products, setProducts] = useState([]);
   const [recommendations, setRecommendations] = useState([]);
@@ -34,32 +39,12 @@ function Dashboard() {
   const [statsError, setStatsError] = useState("");
 
   // ============================================================
-  // API CONFIGURATION
-  // ============================================================
-
-  const API_BASE_URL =
-    import.meta.env.VITE_API_URL || "http://localhost:5000/api";
-
-  // ============================================================
-  // GET AUTH TOKEN
-  // ============================================================
-
-  const getAuthToken = useCallback(() => {
-    return (
-      authToken ||
-      localStorage.getItem("token") ||
-      localStorage.getItem("accessToken") ||
-      localStorage.getItem("jwt") ||
-      null
-    );
-  }, [authToken]);
-
-  // ============================================================
   // LOAD DASHBOARD STATISTICS
   // ============================================================
 
   const loadDashboardStats = useCallback(async () => {
     if (!customer?.id) {
+      setStatsLoading(false);
       return;
     }
 
@@ -67,44 +52,43 @@ function Dashboard() {
       setStatsLoading(true);
       setStatsError("");
 
-      const token = getAuthToken();
+      // IMPORTANT:
+      // Use historyService instead of fetch().
+      //
+      // historyService -> api.js
+      // api.js -> automatically adds /api
+      // api.js -> automatically attaches JWT
+      //
+      // Final request:
+      // GET /api/history/:customerId/stats
 
-      if (!token) {
-        throw new Error("Authentication token is missing.");
-      }
+      const response = await getDashboardStats(customer.id);
 
-      const response = await fetch(
-        `${API_BASE_URL}/history/${customer.id}/stats`,
-        {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        },
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          data?.message || "Failed to fetch dashboard statistics.",
-        );
-      }
+      const stats = response?.stats || {};
 
       setDashboardStats({
-        products_viewed: Number(data?.stats?.products_viewed ?? 0),
-        saved_items: Number(data?.stats?.saved_items ?? 0),
-        purchases: Number(data?.stats?.purchases ?? 0),
+        products_viewed: Number(stats.products_viewed ?? 0),
+        saved_items: Number(stats.saved_items ?? 0),
+        purchases: Number(stats.purchases ?? 0),
       });
     } catch (err) {
       console.error("Failed to load dashboard statistics:", err);
 
-      setStatsError("Unable to load your activity statistics.");
+      setStatsError(
+        err.response?.data?.message ||
+          "Unable to load your activity statistics.",
+      );
+
+      // Keep the dashboard usable even if stats fail.
+      setDashboardStats({
+        products_viewed: 0,
+        saved_items: 0,
+        purchases: 0,
+      });
     } finally {
       setStatsLoading(false);
     }
-  }, [API_BASE_URL, customer?.id, getAuthToken]);
+  }, [customer?.id]);
 
   // ============================================================
   // LOAD DASHBOARD DATA
@@ -126,9 +110,9 @@ function Dashboard() {
     }
 
     const loadDashboard = async () => {
-      // --------------------------------------------------------
+      // ========================================================
       // PRODUCTS
-      // --------------------------------------------------------
+      // ========================================================
 
       try {
         setLoading(true);
@@ -147,9 +131,9 @@ function Dashboard() {
         setLoading(false);
       }
 
-      // --------------------------------------------------------
+      // ========================================================
       // RECOMMENDATIONS
-      // --------------------------------------------------------
+      // ========================================================
 
       try {
         setRecommendationLoading(true);
@@ -168,9 +152,9 @@ function Dashboard() {
         setRecommendationLoading(false);
       }
 
-      // --------------------------------------------------------
+      // ========================================================
       // DASHBOARD STATISTICS
-      // --------------------------------------------------------
+      // ========================================================
 
       await loadDashboardStats();
     };
@@ -179,7 +163,7 @@ function Dashboard() {
   }, [customer?.id, authLoading, loadDashboardStats]);
 
   // ============================================================
-  // REFRESH STATS WHEN ACTIVITY CHANGES
+  // REFRESH STATS WHEN PRODUCT ACTIVITY CHANGES
   // ============================================================
 
   useEffect(() => {
@@ -273,6 +257,14 @@ function Dashboard() {
   }
 
   // ============================================================
+  // MATCH SCORE
+  // ============================================================
+
+  const loyaltyScore = Number(customer?.loyalty_score ?? 0);
+
+  const matchScore = Math.max(0, Math.min(100, loyaltyScore));
+
+  // ============================================================
   // STAT CARDS
   // ============================================================
 
@@ -280,10 +272,7 @@ function Dashboard() {
     {
       icon: "✨",
       label: "Match Score",
-      value: `${Math.max(
-        0,
-        Math.min(100, Number(customer?.loyalty_score ?? 0)),
-      )}%`,
+      value: `${matchScore}%`,
     },
     {
       icon: "🛍️",
@@ -339,10 +328,14 @@ function Dashboard() {
           </section>
 
           {/* ==================================================
-              ERROR
+              GENERAL ERROR
           ================================================== */}
 
           {error && <div className="error-message">{error}</div>}
+
+          {/* ==================================================
+              STATISTICS ERROR
+          ================================================== */}
 
           {statsError && <div className="error-message">{statsError}</div>}
 
@@ -426,7 +419,7 @@ function Dashboard() {
           </section>
 
           {/* ==================================================
-              TRENDING PRODUCTS
+              EXPLORE PRODUCTS
           ================================================== */}
 
           <section className="dashboard-section">
