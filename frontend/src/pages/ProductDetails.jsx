@@ -6,7 +6,11 @@ import "../index.css";
 import Navbar from "../components/Navbar";
 import Sidebar from "../components/Sidebar";
 import { getProductById } from "../services/productService";
-import { recordProductView } from "../services/historyService";
+import {
+  recordProductView,
+  getSavedProductStatus,
+  toggleSavedProduct,
+} from "../services/historyService";
 
 import { useAuth } from "../context/AuthContext";
 
@@ -22,6 +26,7 @@ function ProductDetails() {
   const [error, setError] = useState("");
 
   const [saved, setSaved] = useState(false);
+  const [saveLoading, setSaveLoading] = useState(false);
 
   // ============================================================
   // LOAD PRODUCT
@@ -81,10 +86,13 @@ function ProductDetails() {
       try {
         await recordProductView({
           productId: id,
-          duration: null,
+          duration: 0,
         });
+
+        // Notify Dashboard that a new view was recorded.
+        window.dispatchEvent(new Event("dashboardStatsUpdated"));
       } catch (err) {
-        // Product viewing should not break the page
+        // Viewing a product should never break the page.
         console.error("Failed to record product view:", err);
       }
     };
@@ -93,11 +101,84 @@ function ProductDetails() {
   }, [customer?.id, authLoading, id]);
 
   // ============================================================
-  // SAVE PRODUCT
+  // LOAD SAVED STATUS
   // ============================================================
 
-  const handleSave = () => {
-    setSaved((previous) => !previous);
+  useEffect(() => {
+    if (authLoading || !customer?.id || !id) {
+      return;
+    }
+
+    const loadSavedStatus = async () => {
+      try {
+        const response = await getSavedProductStatus(id);
+
+        setSaved(Boolean(response?.saved));
+      } catch (err) {
+        console.error("Failed to load saved status:", err);
+
+        // If the status cannot be loaded,
+        // keep the default unsaved state.
+        setSaved(false);
+      }
+    };
+
+    loadSavedStatus();
+  }, [customer?.id, authLoading, id]);
+
+  // ============================================================
+  // SAVE / UNSAVE PRODUCT
+  // ============================================================
+
+  const handleSave = async () => {
+    if (!product) {
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // Require authentication
+    // ----------------------------------------------------------
+
+    if (!customer?.id) {
+      navigate("/login", {
+        state: {
+          from: `/product/${id}`,
+        },
+      });
+
+      return;
+    }
+
+    if (saveLoading) {
+      return;
+    }
+
+    try {
+      setSaveLoading(true);
+
+      const response = await toggleSavedProduct(id);
+
+      const newSavedState = Boolean(response?.saved);
+
+      setSaved(newSavedState);
+
+      // --------------------------------------------------------
+      // Notify Dashboard
+      // --------------------------------------------------------
+
+      window.dispatchEvent(new Event("dashboardStatsUpdated"));
+    } catch (err) {
+      console.error("Failed to save product:", err);
+
+      const message =
+        err?.response?.data?.message ||
+        err?.message ||
+        "Unable to update saved product.";
+
+      alert(message);
+    } finally {
+      setSaveLoading(false);
+    }
   };
 
   // ============================================================
@@ -344,12 +425,13 @@ function ProductDetails() {
                   type="button"
                   className={saved ? "save-button saved" : "save-button"}
                   onClick={handleSave}
+                  disabled={saveLoading}
                   aria-label={
                     saved ? "Remove from saved products" : "Save product"
                   }
                   title={saved ? "Remove from saved" : "Save product"}
                 >
-                  {saved ? "♥" : "♡"}
+                  {saveLoading ? "…" : saved ? "♥" : "♡"}
                 </button>
               </div>
 

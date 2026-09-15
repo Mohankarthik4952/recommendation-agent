@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import "../index.css";
@@ -14,16 +14,97 @@ import { useAuth } from "../context/AuthContext";
 function Dashboard() {
   const navigate = useNavigate();
 
-  const { customer, loading: authLoading } = useAuth();
+  const { customer, loading: authLoading, token: authToken } = useAuth();
 
   const [products, setProducts] = useState([]);
   const [recommendations, setRecommendations] = useState([]);
 
+  const [dashboardStats, setDashboardStats] = useState({
+    products_viewed: 0,
+    saved_items: 0,
+    purchases: 0,
+  });
+
   const [loading, setLoading] = useState(true);
   const [recommendationLoading, setRecommendationLoading] = useState(true);
+  const [statsLoading, setStatsLoading] = useState(true);
 
   const [error, setError] = useState("");
   const [recommendationError, setRecommendationError] = useState("");
+  const [statsError, setStatsError] = useState("");
+
+  // ============================================================
+  // API CONFIGURATION
+  // ============================================================
+
+  const API_BASE_URL =
+    import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+
+  // ============================================================
+  // GET AUTH TOKEN
+  // ============================================================
+
+  const getAuthToken = useCallback(() => {
+    return (
+      authToken ||
+      localStorage.getItem("token") ||
+      localStorage.getItem("accessToken") ||
+      localStorage.getItem("jwt") ||
+      null
+    );
+  }, [authToken]);
+
+  // ============================================================
+  // LOAD DASHBOARD STATISTICS
+  // ============================================================
+
+  const loadDashboardStats = useCallback(async () => {
+    if (!customer?.id) {
+      return;
+    }
+
+    try {
+      setStatsLoading(true);
+      setStatsError("");
+
+      const token = getAuthToken();
+
+      if (!token) {
+        throw new Error("Authentication token is missing.");
+      }
+
+      const response = await fetch(
+        `${API_BASE_URL}/history/${customer.id}/stats`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data?.message || "Failed to fetch dashboard statistics.",
+        );
+      }
+
+      setDashboardStats({
+        products_viewed: Number(data?.stats?.products_viewed ?? 0),
+        saved_items: Number(data?.stats?.saved_items ?? 0),
+        purchases: Number(data?.stats?.purchases ?? 0),
+      });
+    } catch (err) {
+      console.error("Failed to load dashboard statistics:", err);
+
+      setStatsError("Unable to load your activity statistics.");
+    } finally {
+      setStatsLoading(false);
+    }
+  }, [API_BASE_URL, customer?.id, getAuthToken]);
 
   // ============================================================
   // LOAD DASHBOARD DATA
@@ -37,7 +118,10 @@ function Dashboard() {
     if (!customer?.id) {
       setLoading(false);
       setRecommendationLoading(false);
+      setStatsLoading(false);
+
       setError("Unable to identify the logged-in customer.");
+
       return;
     }
 
@@ -83,10 +167,48 @@ function Dashboard() {
       } finally {
         setRecommendationLoading(false);
       }
+
+      // --------------------------------------------------------
+      // DASHBOARD STATISTICS
+      // --------------------------------------------------------
+
+      await loadDashboardStats();
     };
 
     loadDashboard();
-  }, [customer, authLoading]);
+  }, [customer?.id, authLoading, loadDashboardStats]);
+
+  // ============================================================
+  // REFRESH STATS WHEN ACTIVITY CHANGES
+  // ============================================================
+
+  useEffect(() => {
+    const handleStatsUpdate = () => {
+      loadDashboardStats();
+    };
+
+    window.addEventListener("dashboardStatsUpdated", handleStatsUpdate);
+
+    return () => {
+      window.removeEventListener("dashboardStatsUpdated", handleStatsUpdate);
+    };
+  }, [loadDashboardStats]);
+
+  // ============================================================
+  // REFRESH STATS WHEN USER RETURNS TO DASHBOARD
+  // ============================================================
+
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      loadDashboardStats();
+    };
+
+    window.addEventListener("focus", handleWindowFocus);
+
+    return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+    };
+  }, [loadDashboardStats]);
 
   // ============================================================
   // FIND RECOMMENDED PRODUCTS
@@ -150,26 +272,33 @@ function Dashboard() {
     );
   }
 
+  // ============================================================
+  // STAT CARDS
+  // ============================================================
+
   const statCards = [
     {
       icon: "✨",
       label: "Match Score",
-      value: `${Math.max(0, Math.min(100, Number(customer?.loyalty_score ?? 0)))}%`,
+      value: `${Math.max(
+        0,
+        Math.min(100, Number(customer?.loyalty_score ?? 0)),
+      )}%`,
     },
     {
       icon: "🛍️",
       label: "Products Viewed",
-      value: Number(customer?.products_viewed ?? 0),
+      value: statsLoading ? "..." : dashboardStats.products_viewed,
     },
     {
       icon: "❤️",
       label: "Saved Items",
-      value: Number(customer?.saved_items ?? 0),
+      value: statsLoading ? "..." : dashboardStats.saved_items,
     },
     {
       icon: "🛒",
       label: "Purchases",
-      value: Number(customer?.previous_purchase_count ?? 0),
+      value: statsLoading ? "..." : dashboardStats.purchases,
     },
   ];
 
@@ -214,6 +343,8 @@ function Dashboard() {
           ================================================== */}
 
           {error && <div className="error-message">{error}</div>}
+
+          {statsError && <div className="error-message">{statsError}</div>}
 
           {/* ==================================================
               STATS
