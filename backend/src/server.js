@@ -8,9 +8,23 @@ const PORT = process.env.PORT || 5000;
 const startServer = async () => {
   try {
     // Check PostgreSQL connection before starting the server
-    await pool.query("SELECT NOW()");
+    const dbInfo = await pool.query(`
+  SELECT
+    current_database() AS database_name,
+    current_schema() AS schema_name,
+    current_user AS database_user
+`);
 
     console.log("PostgreSQL connection successful");
+    console.log("DATABASE INFO:", dbInfo.rows[0]);
+
+    const tableCheck = await pool.query(`
+  SELECT table_schema, table_name
+  FROM information_schema.tables
+  WHERE table_name = 'saved_products'
+`);
+
+    console.log("SAVED_PRODUCTS TABLE:", tableCheck.rows);
 
     const server = app.listen(PORT, "0.0.0.0", () => {
       console.log("======================================");
