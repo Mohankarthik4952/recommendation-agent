@@ -8,12 +8,20 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
+
 def get_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured")
 
     return psycopg2.connect(DATABASE_URL)
 
+
+# ============================================================
+# GET CUSTOMER
+# ============================================================
 
 def get_customer(customer_id):
     conn = get_connection()
@@ -54,6 +62,10 @@ def get_customer(customer_id):
     finally:
         conn.close()
 
+
+# ============================================================
+# GET CUSTOMER INTERACTIONS
+# ============================================================
 
 def get_customer_interactions(customer_id):
     conn = get_connection()
@@ -102,6 +114,61 @@ def get_customer_interactions(customer_id):
                     ),
                     "category": row[9],
                     "brand": row[10],
+                }
+                for row in rows
+            ]
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# GET AVAILABLE PRODUCTS
+# ============================================================
+
+def get_available_products():
+    """
+    Retrieve products that actually exist in the website
+    PostgreSQL catalog and currently have stock available.
+
+    These products are used for cold-start recommendations
+    so the ML service never recommends a product ID that
+    the frontend cannot display.
+    """
+
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    name,
+                    category,
+                    brand,
+                    price,
+                    discount,
+                    rating,
+                    stock
+                FROM products
+                WHERE stock > 0
+                ORDER BY rating DESC, discount DESC
+                """
+            )
+
+            rows = cur.fetchall()
+
+            return [
+                {
+                    "product_id": row[0],
+                    "name": row[1],
+                    "category": row[2],
+                    "brand": row[3],
+                    "price": float(row[4] or 0),
+                    "discount": float(row[5] or 0),
+                    "rating": float(row[6] or 0),
+                    "stock": int(row[7] or 0),
                 }
                 for row in rows
             ]

@@ -10,20 +10,27 @@ Recommendation signals:
 6. Stock availability
 7. Recommendation feedback
 
-The recommendation engine uses category + brand behavioral affinity because
-the source dataset does not provide stable product-level identity suitable
-for classic item-based collaborative filtering.
+Cold-start support:
+- New customers with no interaction history receive
+  non-personalized recommendations based on:
+    * Product rating
+    * Discount
+    * Product popularity
+    * Category diversity
 
-The ML purchase-propensity model is treated as a secondary signal because
-its predictive performance on the supplied dataset is weak.
-
-Recommendation feedback is used as a real-time personalization signal.
-Helpful feedback increases the relevance of related products/categories/brands,
-while not-helpful feedback decreases their relevance.
-
-Important:
-The ML dataset does not contain a stock column. Real stock availability is
-handled by the Node.js backend against the PostgreSQL products table.
+Important architecture:
+- The ML dataset is used for behavioral learning and popularity.
+- PostgreSQL products table is the source of truth for:
+    * Product ID
+    * Product name
+    * Category
+    * Brand
+    * Price
+    * Discount
+    * Rating
+    * Stock
+- Both cold-start and personalized recommendations
+  use the real PostgreSQL product catalog.
 """
 
 import json
@@ -37,6 +44,7 @@ from db import (
     get_customer,
     get_customer_interactions,
     get_customer_recommendation_feedback,
+    get_available_products,
 )
 
 
@@ -64,7 +72,7 @@ EVENT_WEIGHTS = {
 
 
 # ============================================================
-# RECOMMENDATION WEIGHTS
+# PERSONALIZED RECOMMENDATION WEIGHTS
 # ============================================================
 
 AFFINITY_WEIGHT = 0.60
@@ -81,6 +89,17 @@ FEEDBACK_ADJUSTMENT_WEIGHT = 0.05
 
 HELPFUL_VALUE = 1.0
 NOT_HELPFUL_VALUE = -1.0
+
+
+# ============================================================
+# COLD-START SETTINGS
+# ============================================================
+
+COLD_START_RATING_WEIGHT = 0.60
+COLD_START_DISCOUNT_WEIGHT = 0.25
+COLD_START_POPULARITY_WEIGHT = 0.15
+
+COLD_START_MAX_PER_CATEGORY = 2
 
 
 # ============================================================
@@ -113,7 +132,7 @@ def load_dataset():
 
 def list_users(df, limit=200):
     """
-    Return a manageable sample of user summaries for a UI dropdown.
+    Return a manageable sample of user summaries.
     """
 
     counts = (
@@ -210,7 +229,17 @@ def _customer_history_frame(customer_id):
 # ============================================================
 
 def recommend_for_customer(customer_id, top_k=5):
-    profile, df = _customer_history_frame(
+    """
+    Main production entry point.
+
+    Existing customer:
+        Personalized recommendation engine.
+
+    New customer:
+        Cold-start recommendation engine.
+    """
+
+    profile, customer_df = _customer_history_frame(
         customer_id
     )
 
@@ -219,26 +248,397 @@ def recommend_for_customer(customer_id, top_k=5):
             "error": f"customer_id {customer_id} not found"
         }
 
-    if df is None or df.empty:
-        return {
-            "error": (
-                f"no interactions for customer_id "
-                f"{customer_id}"
-            )
-        }
+    # --------------------------------------------------------
+    # NEW CUSTOMER / COLD START
+    # --------------------------------------------------------
+
+    if customer_df is None or customer_df.empty:
+
+        return recommend_cold_start(
+            customer_id=customer_id,
+            profile=profile,
+            top_k=top_k,
+        )
+
+    # --------------------------------------------------------
+    # EXISTING CUSTOMER
+    # --------------------------------------------------------
 
     return recommend_for_user(
         customer_id,
         top_k=top_k,
-        df=df,
+        df=customer_df,
     )
+
+
+# ============================================================
+# COLD-START RECOMMENDATIONS
+# ============================================================
+
+def recommend_cold_start(
+    customer_id,
+    profile,
+    top_k=5,
+):
+    """
+    Generate recommendations for a customer with no
+    interaction history.
+
+    Candidates come directly from the real PostgreSQL
+    products table and only products with stock > 0
+    are considered.
+    """
+
+    products = get_available_products()
+
+    if not products:
+        return {
+            "error": "No available products found in the catalog."
+        }
+
+    catalog = pd.DataFrame(products)
+
+    # --------------------------------------------------------
+    # Normalize product columns
+    # --------------------------------------------------------
+
+    catalog["product_id"] = (
+        catalog["product_id"]
+        .astype(str)
+    )
+
+    catalog["rating"] = pd.to_numeric(
+        catalog["rating"],
+        errors="coerce",
+    ).fillna(0)
+
+    catalog["discount"] = pd.to_numeric(
+        catalog["discount"],
+        errors="coerce",
+    ).fillna(0)
+
+    catalog["price"] = pd.to_numeric(
+        catalog["price"],
+        errors="coerce",
+    ).fillna(0)
+
+    catalog["stock"] = pd.to_numeric(
+        catalog["stock"],
+        errors="coerce",
+    ).fillna(0)
+
+    # --------------------------------------------------------
+    # Rating score
+    # --------------------------------------------------------
+
+    max_rating = catalog["rating"].max()
+
+    if max_rating > 0:
+        catalog["rating_score"] = (
+            catalog["rating"] / max_rating
+        )
+    else:
+        catalog["rating_score"] = 0.0
+
+    # --------------------------------------------------------
+    # Discount score
+    # --------------------------------------------------------
+
+    max_discount = catalog["discount"].max()
+
+    if max_discount > 0:
+        catalog["discount_score"] = (
+            catalog["discount"] / max_discount
+        )
+    else:
+        catalog["discount_score"] = 0.0
+
+    # --------------------------------------------------------
+    # Popularity from ML dataset
+    # --------------------------------------------------------
+
+    try:
+        dataset = load_dataset()
+
+        if "product_id" in dataset.columns:
+
+            popularity = (
+                dataset.groupby("product_id")
+                .size()
+                .rename("popularity_count")
+                .reset_index()
+            )
+
+            popularity["product_id"] = (
+                popularity["product_id"]
+                .astype(str)
+            )
+
+            catalog = catalog.merge(
+                popularity,
+                on="product_id",
+                how="left",
+            )
+
+        else:
+
+            catalog["popularity_count"] = 0
+
+    except Exception:
+
+        catalog["popularity_count"] = 0
+
+    catalog["popularity_count"] = (
+        pd.to_numeric(
+            catalog["popularity_count"],
+            errors="coerce",
+        )
+        .fillna(0)
+    )
+
+    max_popularity = (
+        catalog["popularity_count"].max()
+    )
+
+    if max_popularity > 0:
+        catalog["popularity_score"] = (
+            catalog["popularity_count"]
+            / max_popularity
+        )
+    else:
+        catalog["popularity_score"] = 0.0
+
+    # --------------------------------------------------------
+    # Cold-start score
+    #
+    # Rating       = 60%
+    # Discount     = 25%
+    # Popularity   = 15%
+    # --------------------------------------------------------
+
+    catalog["cold_start_score"] = (
+        catalog["rating_score"]
+        * COLD_START_RATING_WEIGHT
+
+        + catalog["discount_score"]
+        * COLD_START_DISCOUNT_WEIGHT
+
+        + catalog["popularity_score"]
+        * COLD_START_POPULARITY_WEIGHT
+    )
+
+    # --------------------------------------------------------
+    # Sort highest score first
+    # --------------------------------------------------------
+
+    catalog = catalog.sort_values(
+        [
+            "cold_start_score",
+            "rating",
+            "discount",
+        ],
+        ascending=False,
+    )
+
+    # --------------------------------------------------------
+    # Category diversity
+    # --------------------------------------------------------
+
+    selected = []
+    category_counts = {}
+
+    for _, row in catalog.iterrows():
+
+        category = str(
+            row.get("category", "")
+        ).strip()
+
+        count = category_counts.get(
+            category,
+            0,
+        )
+
+        if count >= COLD_START_MAX_PER_CATEGORY:
+            continue
+
+        selected.append(row)
+
+        category_counts[category] = (
+            count + 1
+        )
+
+        if len(selected) >= top_k:
+            break
+
+    # --------------------------------------------------------
+    # Fill remaining slots
+    # --------------------------------------------------------
+
+    if len(selected) < top_k:
+
+        selected_ids = {
+            str(row["product_id"])
+            for row in selected
+        }
+
+        for _, row in catalog.iterrows():
+
+            product_id = str(
+                row["product_id"]
+            )
+
+            if product_id in selected_ids:
+                continue
+
+            selected.append(row)
+
+            if len(selected) >= top_k:
+                break
+
+    # --------------------------------------------------------
+    # Build response
+    # --------------------------------------------------------
+
+    recommendations = []
+
+    for row in selected:
+
+        recommendations.append(
+            {
+                "product_id": str(
+                    row["product_id"]
+                ),
+
+                "name": row.get(
+                    "name"
+                ),
+
+                "category": row.get(
+                    "category"
+                ),
+
+                "brand": row.get(
+                    "brand"
+                ),
+
+                "price": round(
+                    float(
+                        row["price"]
+                    ),
+                    2,
+                ),
+
+                "discount": round(
+                    float(
+                        row["discount"]
+                    ),
+                    2,
+                ),
+
+                "rating": round(
+                    float(
+                        row["rating"]
+                    ),
+                    2,
+                ),
+
+                "stock": int(
+                    row["stock"]
+                ),
+
+                "cold_start_score": round(
+                    float(
+                        row["cold_start_score"]
+                    ),
+                    4,
+                ),
+
+                "recommendation_type": (
+                    "cold_start"
+                ),
+
+                "explanation": (
+                    "Recommended for you as a new "
+                    "customer because it is highly "
+                    "rated, currently discounted, "
+                    "and available in our catalog."
+                ),
+            }
+        )
+
+    # --------------------------------------------------------
+    # Safe profile values
+    # --------------------------------------------------------
+
+    if profile is None:
+        profile = {}
+
+    age = profile.get(
+        "user_age",
+        0,
+    )
+
+    gender = profile.get(
+        "user_gender",
+        "",
+    )
+
+    # --------------------------------------------------------
+    # Final response
+    # --------------------------------------------------------
+
+    return {
+        "user_id": customer_id,
+
+        "recommendation_type": (
+            "cold_start"
+        ),
+
+        "message": (
+            "These recommendations are based on "
+            "highly rated, discounted and popular "
+            "products because this customer has "
+            "no interaction history yet."
+        ),
+
+        "profile_snapshot": {
+            "age": int(age or 0),
+
+            "gender": gender or "",
+
+            "loyalty_score": 0.0,
+
+            "previous_purchase_count": 0,
+
+            "avg_purchase_value": 0.0,
+        },
+
+        "total_interactions": 0,
+
+        "total_purchases": 0,
+
+        "feedback_summary": {
+            "total": 0,
+            "helpful": 0,
+            "not_helpful": 0,
+        },
+
+        "top_categories": {},
+
+        "top_brands": {},
+
+        "recommendations": recommendations,
+    }
 
 
 # ============================================================
 # AFFINITY
 # ============================================================
 
-def _affinity_scores(hist, field):
+def _affinity_scores(
+    hist,
+    field,
+):
     """
     Calculate weighted behavioral affinity.
 
@@ -256,10 +656,14 @@ def _affinity_scores(hist, field):
         .fillna(0)
     )
 
-    scores = d.groupby(field)["weight"].sum()
+    scores = d.groupby(
+        field
+    )["weight"].sum()
 
     if scores.sum() > 0:
-        scores = scores / scores.sum()
+        scores = (
+            scores / scores.sum()
+        )
 
     return scores
 
@@ -338,20 +742,24 @@ def _season_relevance(
             "summer",
             "travel",
         },
+
         "monsoon": {
             "monsoon",
             "rainy",
         },
+
         "festive": {
             "festive",
             "festival",
         },
+
         "winter": {
             "winter",
         },
     }
 
     for group_name, values in seasonal_groups.items():
+
         if (
             current == group_name
             and season in values
@@ -374,6 +782,7 @@ def _discount_score(
     """
 
     try:
+
         discount = float(
             discount or 0
         )
@@ -386,6 +795,7 @@ def _discount_score(
         TypeError,
         ValueError,
     ):
+
         return 0.0
 
     if (
@@ -425,7 +835,9 @@ def _feedback_value(action):
     return 0.0
 
 
-def _build_feedback_profile(feedback_rows):
+def _build_feedback_profile(
+    feedback_rows
+):
     """
     Build normalized feedback signals for:
 
@@ -466,6 +878,7 @@ def _build_feedback_profile(feedback_rows):
         # ----------------------------------------------------
 
         if product_id:
+
             product_values.setdefault(
                 str(product_id),
                 [],
@@ -476,6 +889,7 @@ def _build_feedback_profile(feedback_rows):
         # ----------------------------------------------------
 
         if category:
+
             category_values.setdefault(
                 str(category),
                 [],
@@ -486,6 +900,7 @@ def _build_feedback_profile(feedback_rows):
         # ----------------------------------------------------
 
         if brand:
+
             brand_values.setdefault(
                 str(brand),
                 [],
@@ -499,7 +914,8 @@ def _build_feedback_profile(feedback_rows):
         key: float(
             np.mean(values)
         )
-        for key, values in product_values.items()
+        for key, values
+        in product_values.items()
         if values
     }
 
@@ -511,7 +927,8 @@ def _build_feedback_profile(feedback_rows):
         key: float(
             np.mean(values)
         )
-        for key, values in category_values.items()
+        for key, values
+        in category_values.items()
         if values
     }
 
@@ -523,7 +940,8 @@ def _build_feedback_profile(feedback_rows):
         key: float(
             np.mean(values)
         )
-        for key, values in brand_values.items()
+        for key, values
+        in brand_values.items()
         if values
     }
 
@@ -541,26 +959,32 @@ def _feedback_score(
     feedback_profile,
 ):
     """
-    Calculate feedback relevance for a candidate.
+    Calculate feedback relevance.
 
-    Exact product  -> 50%
-    Category       -> 30%
-    Brand          -> 20%
+    Exact product -> 50%
+    Category      -> 30%
+    Brand         -> 20%
     """
 
-    product_scores = feedback_profile.get(
-        "product",
-        {},
+    product_scores = (
+        feedback_profile.get(
+            "product",
+            {},
+        )
     )
 
-    category_scores = feedback_profile.get(
-        "category",
-        {},
+    category_scores = (
+        feedback_profile.get(
+            "category",
+            {},
+        )
     )
 
-    brand_scores = feedback_profile.get(
-        "brand",
-        {},
+    brand_scores = (
+        feedback_profile.get(
+            "brand",
+            {},
+        )
     )
 
     product_signal = float(
@@ -592,7 +1016,10 @@ def _feedback_score(
 
     return max(
         -1.0,
-        min(score, 1.0),
+        min(
+            score,
+            1.0,
+        ),
     )
 
 
@@ -633,13 +1060,17 @@ def _propensity_score(
             "loyalty_score"
         ],
 
-        "previous_purchase_count": profile_row[
-            "previous_purchase_count"
-        ],
+        "previous_purchase_count": (
+            profile_row[
+                "previous_purchase_count"
+            ]
+        ),
 
-        "avg_purchase_value": profile_row[
-            "avg_purchase_value"
-        ],
+        "avg_purchase_value": (
+            profile_row[
+                "avg_purchase_value"
+            ]
+        ),
 
         "product_category": category,
 
@@ -659,13 +1090,17 @@ def _propensity_score(
     batch = pd.DataFrame([row])
 
     try:
+
         probability = model.predict_proba(
             batch
         )[0][1]
 
-        return float(probability)
+        return float(
+            probability
+        )
 
     except Exception:
+
         return 0.0
 
 
@@ -673,36 +1108,47 @@ def _propensity_score(
 # PRODUCT CANDIDATES
 # ============================================================
 
-def _build_candidate_pairs(df):
+def _build_candidate_pairs(
+    products
+):
     """
-    Build category + brand combinations from the real dataset.
+    Build category + brand combinations
+    from the real PostgreSQL catalog.
     """
 
-    categories = (
-        df["product_category"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
+    pairs = set()
 
-    brands = (
-        df["brand"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
+    for product in products:
 
-    return [
-        (category, brand)
-        for category in categories
-        for brand in brands
-    ]
+        category = str(
+            product.get(
+                "category",
+                "",
+            )
+        ).strip()
+
+        brand = str(
+            product.get(
+                "brand",
+                "",
+            )
+        ).strip()
+
+        if not category or not brand:
+            continue
+
+        pairs.add(
+            (
+                category,
+                brand,
+            )
+        )
+
+    return list(pairs)
 
 
 # ============================================================
-# MAIN RECOMMENDATION ENGINE
+# MAIN PERSONALIZED RECOMMENDATION ENGINE
 # ============================================================
 
 def recommend_for_user(
@@ -710,6 +1156,14 @@ def recommend_for_user(
     top_k=5,
     df=None,
 ):
+    """
+    Personalized recommendation engine.
+
+    Behavioral signals come from the customer's interaction
+    history.
+
+    Candidate products come from the real PostgreSQL catalog.
+    """
 
     if df is None:
         df = load_dataset()
@@ -719,20 +1173,88 @@ def recommend_for_user(
         user_id,
     )
 
+    # --------------------------------------------------------
+    # Safety fallback
+    # --------------------------------------------------------
+
     if hist.empty:
+
+        profile = get_customer(
+            user_id
+        )
+
+        return recommend_cold_start(
+            customer_id=user_id,
+            profile=profile,
+            top_k=top_k,
+        )
+
+    # --------------------------------------------------------
+    # REAL WEBSITE PRODUCT CATALOG
+    # --------------------------------------------------------
+
+    catalog_products = (
+        get_available_products()
+    )
+
+    if not catalog_products:
+
         return {
             "error": (
-                f"user_id {user_id} not found"
+                "No available products found "
+                "in the catalog."
             )
         }
 
-    profile = _latest_profile(hist)
+    catalog_df = pd.DataFrame(
+        catalog_products
+    )
+
+    # --------------------------------------------------------
+    # Normalize catalog
+    # --------------------------------------------------------
+
+    catalog_df["product_id"] = (
+        catalog_df["product_id"]
+        .astype(str)
+    )
+
+    catalog_df["category"] = (
+        catalog_df["category"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    catalog_df["brand"] = (
+        catalog_df["brand"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    catalog_df["price"] = pd.to_numeric(
+        catalog_df["price"],
+        errors="coerce",
+    ).fillna(0)
+
+    catalog_df["discount"] = pd.to_numeric(
+        catalog_df["discount"],
+        errors="coerce",
+    ).fillna(0)
+
+    catalog_df["rating"] = pd.to_numeric(
+        catalog_df["rating"],
+        errors="coerce",
+    ).fillna(0)
+
+    catalog_df["stock"] = pd.to_numeric(
+        catalog_df["stock"],
+        errors="coerce",
+    ).fillna(0)
 
     # --------------------------------------------------------
     # Behavioral affinity
-    #
-    # IMPORTANT:
-    # Keep these Series unchanged.
     # --------------------------------------------------------
 
     category_affinity_scores = (
@@ -753,7 +1275,9 @@ def recommend_for_user(
     # Customer statistics
     # --------------------------------------------------------
 
-    n_interactions = len(hist)
+    n_interactions = len(
+        hist
+    )
 
     n_purchases = int(
         (
@@ -766,7 +1290,9 @@ def recommend_for_user(
     # Current season
     # --------------------------------------------------------
 
-    current_season = _current_season()
+    current_season = (
+        _current_season()
+    )
 
     # --------------------------------------------------------
     # User context
@@ -809,16 +1335,11 @@ def recommend_for_user(
     )
 
     # --------------------------------------------------------
-    # Dataset statistics
+    # MAX DISCOUNT FROM REAL CATALOG
     # --------------------------------------------------------
 
     max_discount = float(
-        pd.to_numeric(
-            df["discount"],
-            errors="coerce",
-        )
-        .fillna(0)
-        .max()
+        catalog_df["discount"].max()
     )
 
     # --------------------------------------------------------
@@ -844,31 +1365,39 @@ def recommend_for_user(
     helpful_count = sum(
         1
         for row in feedback_rows
-        if row.get("action") == "helpful"
+        if str(
+            row.get(
+                "action",
+                "",
+            )
+        ).lower()
+        == "helpful"
     )
 
     not_helpful_count = sum(
         1
         for row in feedback_rows
-        if row.get("action") == "not_helpful"
+        if str(
+            row.get(
+                "action",
+                "",
+            )
+        ).lower()
+        == "not_helpful"
     )
 
     # --------------------------------------------------------
-    # Purchased category/brand combinations
+    # Purchased products
     # --------------------------------------------------------
 
-    purchased = hist[
-        hist["interaction_type"]
-        == "purchase"
-    ]
-
-    purchased_pairs = set(
-        zip(
-            purchased[
-                "product_category"
-            ],
-            purchased["brand"],
-        )
+    purchased_product_ids = set(
+        hist.loc[
+            hist["interaction_type"]
+            == "purchase",
+            "product_id",
+        ]
+        .astype(str)
+        .tolist()
     )
 
     # --------------------------------------------------------
@@ -876,29 +1405,102 @@ def recommend_for_user(
     # --------------------------------------------------------
 
     pairs = _build_candidate_pairs(
-        df
+        catalog_products
     )
 
     candidates = []
 
-    for category, brand in pairs:
+    # ========================================================
+    # SCORE EACH REAL CATALOG PRODUCT
+    # ========================================================
+
+    for product in catalog_products:
+
+        product_id = str(
+            product.get(
+                "product_id",
+                "",
+            )
+        )
 
         # ----------------------------------------------------
-        # Skip combinations already purchased
+        # Skip invalid product
         # ----------------------------------------------------
 
-        if (
-            category,
-            brand,
-        ) in purchased_pairs:
+        if not product_id:
             continue
 
         # ----------------------------------------------------
-        # Affinity
-        #
-        # IMPORTANT:
-        # Use separate local variables so we don't overwrite
-        # the original Pandas Series.
+        # Skip out-of-stock
+        # ----------------------------------------------------
+
+        stock = int(
+            product.get(
+                "stock",
+                0,
+            )
+            or 0
+        )
+
+        if stock <= 0:
+            continue
+
+        # ----------------------------------------------------
+        # Skip products already purchased
+        # ----------------------------------------------------
+
+        if product_id in purchased_product_ids:
+            continue
+
+        # ----------------------------------------------------
+        # Product information
+        # ----------------------------------------------------
+
+        category = str(
+            product.get(
+                "category",
+                "",
+            )
+        ).strip()
+
+        brand = str(
+            product.get(
+                "brand",
+                "",
+            )
+        ).strip()
+
+        product_name = product.get(
+            "name",
+            "",
+        )
+
+        price = float(
+            product.get(
+                "price",
+                0,
+            )
+            or 0
+        )
+
+        discount = float(
+            product.get(
+                "discount",
+                0,
+            )
+            or 0
+        )
+
+        rating = float(
+            product.get(
+                "rating",
+                0,
+            )
+            or 0
+        )
+
+        # ----------------------------------------------------
+        # Category affinity
         # ----------------------------------------------------
 
         category_affinity_value = float(
@@ -908,6 +1510,10 @@ def recommend_for_user(
             )
         )
 
+        # ----------------------------------------------------
+        # Brand affinity
+        # ----------------------------------------------------
+
         brand_affinity_value = float(
             brand_affinity_scores.get(
                 brand,
@@ -915,131 +1521,29 @@ def recommend_for_user(
             )
         )
 
+        # ----------------------------------------------------
+        # Combined affinity
+        # ----------------------------------------------------
+
         affinity_score = (
-            category_affinity_value * 0.60
-            + brand_affinity_value * 0.40
-        )
-
-        # ----------------------------------------------------
-        # Representative product context
-        # ----------------------------------------------------
-
-        matching_products = df[
-            (
-                df["product_category"]
-                == category
-            )
-            & (
-                df["brand"]
-                == brand
-            )
-        ].copy()
-
-        if matching_products.empty:
-            continue
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # The ML CSV does not contain stock.
-        #
-        # Stock is checked later by the Node.js backend
-        # against the PostgreSQL products table.
-        # ----------------------------------------------------
-
-        available_products = (
-            matching_products.copy()
-        )
-
-        if available_products.empty:
-            continue
-
-        # ----------------------------------------------------
-        # Prefer products with higher discounts and ratings.
-        # ----------------------------------------------------
-
-        available_products[
-            "discount_numeric"
-        ] = (
-            pd.to_numeric(
-                available_products[
-                    "discount"
-                ],
-                errors="coerce",
-            )
-            .fillna(0)
-        )
-
-        if "rating" in available_products.columns:
-
-            available_products[
-                "rating_numeric"
-            ] = (
-                pd.to_numeric(
-                    available_products[
-                        "rating"
-                    ],
-                    errors="coerce",
-                )
-                .fillna(0)
-            )
-
-            sort_columns = [
-                "discount_numeric",
-                "rating_numeric",
-            ]
-
-        else:
-
-            sort_columns = [
-                "discount_numeric",
-            ]
-
-        available_products = (
-            available_products
-            .sort_values(
-                sort_columns,
-                ascending=False,
-            )
-        )
-
-        representative = (
-            available_products.iloc[0]
-        )
-
-        # ----------------------------------------------------
-        # Representative product values
-        # ----------------------------------------------------
-
-        product_id = representative.get(
-            "product_id",
-            None,
-        )
-
-        price = float(
-            representative.get(
-                "price",
-                0,
-            )
-            or 0
-        )
-
-        discount = float(
-            representative.get(
-                "discount",
-                0,
-            )
-            or 0
-        )
-
-        product_season = representative.get(
-            "season",
-            "",
+            category_affinity_value
+            * 0.60
+            +
+            brand_affinity_value
+            * 0.40
         )
 
         # ----------------------------------------------------
         # Seasonal score
+        #
+        # Production products currently do not necessarily
+        # contain a season field, so this safely returns 0.
         # ----------------------------------------------------
+
+        product_season = product.get(
+            "season",
+            "",
+        )
 
         season_score = _season_relevance(
             product_season,
@@ -1060,7 +1564,7 @@ def recommend_for_user(
         # ----------------------------------------------------
 
         propensity = _propensity_score(
-            profile,
+            hist.iloc[-1],
             category,
             brand,
             device_type,
@@ -1082,7 +1586,12 @@ def recommend_for_user(
         )
 
         # ----------------------------------------------------
-        # Existing recommendation score
+        # Base score
+        #
+        # Affinity    = 60%
+        # Propensity  = 20%
+        # Season      = 10%
+        # Discount    = 10%
         # ----------------------------------------------------
 
         base_score = (
@@ -1131,9 +1640,7 @@ def recommend_for_user(
 
         category_interactions = int(
             (
-                hist[
-                    "product_category"
-                ]
+                hist["product_category"]
                 == category
             ).sum()
         )
@@ -1146,7 +1653,8 @@ def recommend_for_user(
                     ]
                     == category
                 )
-                & (
+                &
+                (
                     hist[
                         "interaction_type"
                     ]
@@ -1228,8 +1736,8 @@ def recommend_for_user(
         if not reasons:
 
             reasons.append(
-                "it matches available products "
-                "with current stock"
+                "it matches your available "
+                "behavioral preferences"
             )
 
         explanation = (
@@ -1246,6 +1754,8 @@ def recommend_for_user(
             {
                 "product_id": product_id,
 
+                "name": product_name,
+
                 "category": category,
 
                 "brand": brand,
@@ -1260,9 +1770,18 @@ def recommend_for_user(
                     2,
                 ),
 
+                "rating": round(
+                    rating,
+                    2,
+                ),
+
+                "stock": stock,
+
                 "season": product_season,
 
-                "current_season": current_season,
+                "current_season": (
+                    current_season
+                ),
 
                 "affinity_score": round(
                     float(
@@ -1271,11 +1790,13 @@ def recommend_for_user(
                     4,
                 ),
 
-                "predicted_purchase_probability": round(
-                    float(
-                        propensity
-                    ),
-                    4,
+                "predicted_purchase_probability": (
+                    round(
+                        float(
+                            propensity
+                        ),
+                        4,
+                    )
                 ),
 
                 "seasonal_relevance": round(
@@ -1320,6 +1841,10 @@ def recommend_for_user(
                     4,
                 ),
 
+                "recommendation_type": (
+                    "personalized"
+                ),
+
                 "explanation": explanation,
             }
         )
@@ -1335,14 +1860,81 @@ def recommend_for_user(
         reverse=True,
     )
 
-    top = candidates[:top_k]
+    # --------------------------------------------------------
+    # Category diversity for personalized recommendations
+    # --------------------------------------------------------
+
+    selected = []
+    category_counts = {}
+
+    for candidate in candidates:
+
+        category = candidate.get(
+            "category",
+            "",
+        )
+
+        count = category_counts.get(
+            category,
+            0,
+        )
+
+        # Avoid showing too many products from one category
+        # when enough alternatives are available.
+        if count >= 2:
+            continue
+
+        selected.append(
+            candidate
+        )
+
+        category_counts[category] = (
+            count + 1
+        )
+
+        if len(selected) >= top_k:
+            break
+
+    # --------------------------------------------------------
+    # Fill remaining slots
+    # --------------------------------------------------------
+
+    if len(selected) < top_k:
+
+        selected_ids = {
+            item["product_id"]
+            for item in selected
+        }
+
+        for candidate in candidates:
+
+            if (
+                candidate["product_id"]
+                in selected_ids
+            ):
+                continue
+
+            selected.append(
+                candidate
+            )
+
+            if len(selected) >= top_k:
+                break
+
+    top = selected[:top_k]
 
     # ========================================================
     # RESPONSE
     # ========================================================
 
+    profile = hist.iloc[-1]
+
     return {
         "user_id": user_id,
+
+        "recommendation_type": (
+            "personalized"
+        ),
 
         "profile_snapshot": {
             "note": (
@@ -1382,22 +1974,26 @@ def recommend_for_user(
 
         "current_season": current_season,
 
-        "total_interactions": n_interactions,
+        "total_interactions": (
+            n_interactions
+        ),
 
-        "total_purchases": n_purchases,
-
-        # ----------------------------------------------------
-        # Feedback summary
-        # ----------------------------------------------------
+        "total_purchases": (
+            n_purchases
+        ),
 
         "feedback_summary": {
             "total": len(
                 feedback_rows
             ),
 
-            "helpful": helpful_count,
+            "helpful": (
+                helpful_count
+            ),
 
-            "not_helpful": not_helpful_count,
+            "not_helpful": (
+                not_helpful_count
+            ),
         },
 
         "top_categories": (
@@ -1444,10 +2040,26 @@ if __name__ == "__main__":
 
     df = load_dataset()
 
+    # ========================================================
+    # EXISTING USER TEST
+    # ========================================================
+
     sample_user = (
         df.user_id
         .value_counts()
         .index[0]
+    )
+
+    print(
+        "\n============================================"
+    )
+
+    print(
+        "EXISTING USER TEST"
+    )
+
+    print(
+        "============================================\n"
     )
 
     result = recommend_for_user(
@@ -1464,12 +2076,63 @@ if __name__ == "__main__":
         )
     )
 
-    print()
+    # ========================================================
+    # COLD-START TEST
+    # ========================================================
 
     print(
-        "Model metrics:",
+        "\n============================================"
+    )
+
+    print(
+        "COLD-START TEST"
+    )
+
+    print(
+        "============================================\n"
+    )
+
+    cold_start_result = (
+        recommend_cold_start(
+            customer_id="NEW_USER_TEST",
+            profile={
+                "user_age": 22,
+                "user_gender": "Male",
+                "loyalty_score": 0,
+                "previous_purchase_count": 0,
+                "avg_purchase_value": 0,
+            },
+            top_k=5,
+        )
+    )
+
+    print(
+        json.dumps(
+            cold_start_result,
+            indent=2,
+            default=str,
+        )
+    )
+
+    # ========================================================
+    # MODEL METRICS
+    # ========================================================
+
+    print(
+        "\n============================================"
+    )
+
+    print(
+        "MODEL METRICS"
+    )
+
+    print(
+        "============================================\n"
+    )
+
+    print(
         json.dumps(
             get_model_metrics(),
             indent=2,
-        ),
+        )
     )
