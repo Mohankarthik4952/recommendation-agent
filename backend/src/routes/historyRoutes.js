@@ -4,6 +4,7 @@ const {
   getPurchaseHistory,
   getBrowsingHistory,
   recordView,
+  recordInteraction,
   getDashboardStats,
   getSavedProducts,
   getSavedStatus,
@@ -55,5 +56,19 @@ router.post("/saved/toggle", authenticateToken, toggleSaved);
 // ============================================================
 
 router.post("/view", authenticateToken, recordView);
+
+// ============================================================
+// RECORD CUSTOMER INTERACTION
+// ============================================================
+// Used for recommendation signals such as:
+// - click
+// - add_to_cart
+// - like
+//
+// The customer ID comes from the JWT:
+// req.customerId
+// ============================================================
+
+router.post("/interaction", authenticateToken, recordInteraction);
 
 module.exports = router;
