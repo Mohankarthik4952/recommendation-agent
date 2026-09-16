@@ -119,6 +119,123 @@ def _get_model():
 
 
 # ============================================================
+# SAFE VALUE HELPERS
+# ============================================================
+
+def _safe_int(value, default=0):
+    """
+    Safely convert a value to int.
+
+    Handles:
+    - None
+    - NaN
+    - empty strings
+    - numeric strings
+    - floats
+    """
+
+    try:
+        if value is None:
+            return default
+
+        if pd.isna(value):
+            return default
+
+        if isinstance(value, str) and not value.strip():
+            return default
+
+        return int(float(value))
+
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value, default=0.0):
+    """
+    Safely convert a value to float.
+
+    Handles:
+    - None
+    - NaN
+    - empty strings
+    - numeric strings
+    """
+
+    try:
+        if value is None:
+            return default
+
+        if pd.isna(value):
+            return default
+
+        if isinstance(value, str) and not value.strip():
+            return default
+
+        return float(value)
+
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_string(value, default=""):
+    """
+    Safely convert a value to string.
+    """
+
+    if value is None:
+        return default
+
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+
+    return str(value)
+
+
+def _normalize_profile(profile):
+    """
+    Normalize customer profile values so NULL database values
+    never reach int(), float(), or the ML model.
+    """
+
+    if profile is None:
+        profile = {}
+
+    return {
+        "user_age": _safe_int(
+            profile.get("user_age"),
+            0,
+        ),
+
+        "user_gender": _safe_string(
+            profile.get("user_gender"),
+            "",
+        ),
+
+        "loyalty_score": _safe_float(
+            profile.get("loyalty_score"),
+            0.0,
+        ),
+
+        "previous_purchase_count": _safe_int(
+            profile.get(
+                "previous_purchase_count"
+            ),
+            0,
+        ),
+
+        "avg_purchase_value": _safe_float(
+            profile.get(
+                "avg_purchase_value"
+            ),
+            0.0,
+        ),
+    }
+
+
+# ============================================================
 # DATASET
 # ============================================================
 
@@ -193,6 +310,13 @@ def _customer_history_frame(customer_id):
     if profile is None:
         return None, None
 
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Normalize database NULL values immediately.
+    # --------------------------------------------------------
+
+    profile = _normalize_profile(profile)
+
     rows = get_customer_interactions(customer_id)
 
     if not rows:
@@ -202,9 +326,21 @@ def _customer_history_frame(customer_id):
 
     df["user_id"] = customer_id
 
-    df["user_age"] = profile["user_age"]
-    df["user_gender"] = profile["user_gender"]
-    df["loyalty_score"] = profile["loyalty_score"]
+    # --------------------------------------------------------
+    # Safe customer profile values
+    # --------------------------------------------------------
+
+    df["user_age"] = profile[
+        "user_age"
+    ]
+
+    df["user_gender"] = profile[
+        "user_gender"
+    ]
+
+    df["loyalty_score"] = profile[
+        "loyalty_score"
+    ]
 
     df["previous_purchase_count"] = profile[
         "previous_purchase_count"
@@ -214,7 +350,71 @@ def _customer_history_frame(customer_id):
         "avg_purchase_value"
     ]
 
-    df["product_category"] = df["category"]
+    # --------------------------------------------------------
+    # Product category
+    # --------------------------------------------------------
+
+    if "category" in df.columns:
+        df["product_category"] = (
+            df["category"]
+            .fillna("")
+            .astype(str)
+        )
+    else:
+        df["product_category"] = ""
+
+    # --------------------------------------------------------
+    # Safe interaction fields
+    # --------------------------------------------------------
+
+    if "brand" in df.columns:
+        df["brand"] = (
+            df["brand"]
+            .fillna("")
+            .astype(str)
+        )
+    else:
+        df["brand"] = ""
+
+    if "device_type" not in df.columns:
+        df["device_type"] = "unknown"
+    else:
+        df["device_type"] = (
+            df["device_type"]
+            .fillna("unknown")
+            .astype(str)
+        )
+
+    if "location" not in df.columns:
+        df["location"] = "unknown"
+    else:
+        df["location"] = (
+            df["location"]
+            .fillna("unknown")
+            .astype(str)
+        )
+
+    if "search_keywords" not in df.columns:
+        df["search_keywords"] = ""
+    else:
+        df["search_keywords"] = (
+            df["search_keywords"]
+            .fillna("")
+            .astype(str)
+        )
+
+    if "interaction_type" not in df.columns:
+        df["interaction_type"] = ""
+    else:
+        df["interaction_type"] = (
+            df["interaction_type"]
+            .fillna("")
+            .astype(str)
+        )
+
+    # --------------------------------------------------------
+    # Timestamp
+    # --------------------------------------------------------
 
     df["timestamp"] = pd.to_datetime(
         df["timestamp"],
@@ -288,6 +488,12 @@ def recommend_cold_start(
     products table and only products with stock > 0
     are considered.
     """
+
+    # --------------------------------------------------------
+    # Normalize profile
+    # --------------------------------------------------------
+
+    profile = _normalize_profile(profile)
 
     products = get_available_products()
 
@@ -384,7 +590,12 @@ def recommend_cold_start(
 
             catalog["popularity_count"] = 0
 
-    except Exception:
+    except Exception as error:
+
+        print(
+            "Popularity calculation warning:",
+            error,
+        )
 
         catalog["popularity_count"] = 0
 
@@ -522,33 +733,35 @@ def recommend_cold_start(
                 ),
 
                 "price": round(
-                    float(
-                        row["price"]
+                    _safe_float(
+                        row.get("price")
                     ),
                     2,
                 ),
 
                 "discount": round(
-                    float(
-                        row["discount"]
+                    _safe_float(
+                        row.get("discount")
                     ),
                     2,
                 ),
 
                 "rating": round(
-                    float(
-                        row["rating"]
+                    _safe_float(
+                        row.get("rating")
                     ),
                     2,
                 ),
 
-                "stock": int(
-                    row["stock"]
+                "stock": _safe_int(
+                    row.get("stock")
                 ),
 
                 "cold_start_score": round(
-                    float(
-                        row["cold_start_score"]
+                    _safe_float(
+                        row.get(
+                            "cold_start_score"
+                        )
                     ),
                     4,
                 ),
@@ -565,23 +778,6 @@ def recommend_cold_start(
                 ),
             }
         )
-
-    # --------------------------------------------------------
-    # Safe profile values
-    # --------------------------------------------------------
-
-    if profile is None:
-        profile = {}
-
-    age = profile.get(
-        "user_age",
-        0,
-    )
-
-    gender = profile.get(
-        "user_gender",
-        "",
-    )
 
     # --------------------------------------------------------
     # Final response
@@ -602,15 +798,29 @@ def recommend_cold_start(
         ),
 
         "profile_snapshot": {
-            "age": int(age or 0),
+            "age": _safe_int(
+                profile.get("user_age")
+            ),
 
-            "gender": gender or "",
+            "gender": _safe_string(
+                profile.get("user_gender")
+            ),
 
-            "loyalty_score": 0.0,
+            "loyalty_score": _safe_float(
+                profile.get("loyalty_score")
+            ),
 
-            "previous_purchase_count": 0,
+            "previous_purchase_count": _safe_int(
+                profile.get(
+                    "previous_purchase_count"
+                )
+            ),
 
-            "avg_purchase_value": 0.0,
+            "avg_purchase_value": _safe_float(
+                profile.get(
+                    "avg_purchase_value"
+                )
+            ),
         },
 
         "total_interactions": 0,
@@ -647,6 +857,9 @@ def _affinity_scores(
     add_to_cart = 3
     purchase    = 5
     """
+
+    if field not in hist.columns:
+        return pd.Series(dtype=float)
 
     d = hist.copy()
 
@@ -781,22 +994,15 @@ def _discount_score(
     Convert product discount into a normalized score.
     """
 
-    try:
+    discount = _safe_float(
+        discount,
+        0.0,
+    )
 
-        discount = float(
-            discount or 0
-        )
-
-        max_discount = float(
-            max_discount or 0
-        )
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-
-        return 0.0
+    max_discount = _safe_float(
+        max_discount,
+        0.0,
+    )
 
     if (
         discount <= 0
@@ -873,20 +1079,12 @@ def _build_feedback_profile(
             "brand"
         )
 
-        # ----------------------------------------------------
-        # Product feedback
-        # ----------------------------------------------------
-
         if product_id:
 
             product_values.setdefault(
                 str(product_id),
                 [],
             ).append(value)
-
-        # ----------------------------------------------------
-        # Category feedback
-        # ----------------------------------------------------
 
         if category:
 
@@ -895,20 +1093,12 @@ def _build_feedback_profile(
                 [],
             ).append(value)
 
-        # ----------------------------------------------------
-        # Brand feedback
-        # ----------------------------------------------------
-
         if brand:
 
             brand_values.setdefault(
                 str(brand),
                 [],
             ).append(value)
-
-    # --------------------------------------------------------
-    # Average product feedback
-    # --------------------------------------------------------
 
     product_scores = {
         key: float(
@@ -919,10 +1109,6 @@ def _build_feedback_profile(
         if values
     }
 
-    # --------------------------------------------------------
-    # Average category feedback
-    # --------------------------------------------------------
-
     category_scores = {
         key: float(
             np.mean(values)
@@ -931,10 +1117,6 @@ def _build_feedback_profile(
         in category_values.items()
         if values
     }
-
-    # --------------------------------------------------------
-    # Average brand feedback
-    # --------------------------------------------------------
 
     brand_scores = {
         key: float(
@@ -987,21 +1169,21 @@ def _feedback_score(
         )
     )
 
-    product_signal = float(
+    product_signal = _safe_float(
         product_scores.get(
             str(product_id),
             0.0,
         )
     )
 
-    category_signal = float(
+    category_signal = _safe_float(
         category_scores.get(
             str(category),
             0.0,
         )
     )
 
-    brand_signal = float(
+    brand_signal = _safe_float(
         brand_scores.get(
             str(brand),
             0.0,
@@ -1043,48 +1225,95 @@ def _propensity_score(
 
     model = _get_model()
 
+    # --------------------------------------------------------
+    # Safely normalize profile values before sending them
+    # to the Random Forest.
+    # --------------------------------------------------------
+
+    user_age = _safe_int(
+        profile_row.get("user_age")
+        if hasattr(profile_row, "get")
+        else profile_row["user_age"]
+    )
+
+    user_gender = _safe_string(
+        profile_row.get("user_gender")
+        if hasattr(profile_row, "get")
+        else profile_row["user_gender"]
+    )
+
+    loyalty_score = _safe_float(
+        profile_row.get("loyalty_score")
+        if hasattr(profile_row, "get")
+        else profile_row["loyalty_score"]
+    )
+
+    previous_purchase_count = _safe_int(
+        profile_row.get(
+            "previous_purchase_count"
+        )
+        if hasattr(profile_row, "get")
+        else profile_row[
+            "previous_purchase_count"
+        ]
+    )
+
+    avg_purchase_value = _safe_float(
+        profile_row.get(
+            "avg_purchase_value"
+        )
+        if hasattr(profile_row, "get")
+        else profile_row[
+            "avg_purchase_value"
+        ]
+    )
+
     row = {
-        "price": float(
-            price or 0
-        ),
+        "price": _safe_float(price),
 
-        "discount": float(
-            discount or 0
-        ),
+        "discount": _safe_float(discount),
 
-        "user_age": profile_row[
-            "user_age"
-        ],
+        "user_age": user_age,
 
-        "loyalty_score": profile_row[
-            "loyalty_score"
-        ],
+        "loyalty_score": loyalty_score,
 
         "previous_purchase_count": (
-            profile_row[
-                "previous_purchase_count"
-            ]
+            previous_purchase_count
         ),
 
         "avg_purchase_value": (
-            profile_row[
-                "avg_purchase_value"
-            ]
+            avg_purchase_value
         ),
 
-        "product_category": category,
+        "product_category": (
+            _safe_string(category)
+        ),
 
-        "brand": brand,
+        "brand": (
+            _safe_string(brand)
+        ),
 
-        "device_type": device_type,
+        "device_type": (
+            _safe_string(
+                device_type,
+                "unknown",
+            )
+        ),
 
-        "location": location,
+        "location": (
+            _safe_string(
+                location,
+                "unknown",
+            )
+        ),
 
-        "user_gender": profile_row[
-            "user_gender"
-        ],
+        "user_gender": user_gender,
 
-        "search_keywords": search_keyword,
+        "search_keywords": (
+            _safe_string(
+                search_keyword
+            )
+        ),
     }
 
     batch = pd.DataFrame([row])
@@ -1095,11 +1324,17 @@ def _propensity_score(
             batch
         )[0][1]
 
-        return float(
-            probability
+        return _safe_float(
+            probability,
+            0.0,
         )
 
-    except Exception:
+    except Exception as error:
+
+        print(
+            "Purchase propensity warning:",
+            error,
+        )
 
         return 0.0
 
@@ -1338,7 +1573,7 @@ def recommend_for_user(
     # MAX DISCOUNT FROM REAL CATALOG
     # --------------------------------------------------------
 
-    max_discount = float(
+    max_discount = _safe_float(
         catalog_df["discount"].max()
     )
 
@@ -1351,6 +1586,9 @@ def recommend_for_user(
             user_id
         )
     )
+
+    if feedback_rows is None:
+        feedback_rows = []
 
     feedback_profile = (
         _build_feedback_profile(
@@ -1434,12 +1672,11 @@ def recommend_for_user(
         # Skip out-of-stock
         # ----------------------------------------------------
 
-        stock = int(
+        stock = _safe_int(
             product.get(
                 "stock",
                 0,
             )
-            or 0
         )
 
         if stock <= 0:
@@ -1475,35 +1712,32 @@ def recommend_for_user(
             "",
         )
 
-        price = float(
+        price = _safe_float(
             product.get(
                 "price",
                 0,
             )
-            or 0
         )
 
-        discount = float(
+        discount = _safe_float(
             product.get(
                 "discount",
                 0,
             )
-            or 0
         )
 
-        rating = float(
+        rating = _safe_float(
             product.get(
                 "rating",
                 0,
             )
-            or 0
         )
 
         # ----------------------------------------------------
         # Category affinity
         # ----------------------------------------------------
 
-        category_affinity_value = float(
+        category_affinity_value = _safe_float(
             category_affinity_scores.get(
                 category,
                 0,
@@ -1514,7 +1748,7 @@ def recommend_for_user(
         # Brand affinity
         # ----------------------------------------------------
 
-        brand_affinity_value = float(
+        brand_affinity_value = _safe_float(
             brand_affinity_scores.get(
                 brand,
                 0,
@@ -1535,9 +1769,6 @@ def recommend_for_user(
 
         # ----------------------------------------------------
         # Seasonal score
-        #
-        # Production products currently do not necessarily
-        # contain a season field, so this safely returns 0.
         # ----------------------------------------------------
 
         product_season = product.get(
@@ -1784,7 +2015,7 @@ def recommend_for_user(
                 ),
 
                 "affinity_score": round(
-                    float(
+                    _safe_float(
                         affinity_score
                     ),
                     4,
@@ -1792,7 +2023,7 @@ def recommend_for_user(
 
                 "predicted_purchase_probability": (
                     round(
-                        float(
+                        _safe_float(
                             propensity
                         ),
                         4,
@@ -1800,42 +2031,42 @@ def recommend_for_user(
                 ),
 
                 "seasonal_relevance": round(
-                    float(
+                    _safe_float(
                         season_score
                     ),
                     4,
                 ),
 
                 "discount_score": round(
-                    float(
+                    _safe_float(
                         discount_score
                     ),
                     4,
                 ),
 
                 "feedback_score": round(
-                    float(
+                    _safe_float(
                         feedback_score
                     ),
                     4,
                 ),
 
                 "feedback_adjustment": round(
-                    float(
+                    _safe_float(
                         feedback_adjustment
                     ),
                     4,
                 ),
 
                 "base_score": round(
-                    float(
+                    _safe_float(
                         base_score
                     ),
                     4,
                 ),
 
                 "final_score": round(
-                    float(
+                    _safe_float(
                         final_score
                     ),
                     4,
@@ -1861,7 +2092,7 @@ def recommend_for_user(
     )
 
     # --------------------------------------------------------
-    # Category diversity for personalized recommendations
+    # Category diversity
     # --------------------------------------------------------
 
     selected = []
@@ -1879,8 +2110,6 @@ def recommend_for_user(
             0,
         )
 
-        # Avoid showing too many products from one category
-        # when enough alternatives are available.
         if count >= 2:
             continue
 
@@ -1924,10 +2153,14 @@ def recommend_for_user(
     top = selected[:top_k]
 
     # ========================================================
-    # RESPONSE
+    # SAFE PROFILE RESPONSE
     # ========================================================
 
     profile = hist.iloc[-1]
+
+    # ========================================================
+    # RESPONSE
+    # ========================================================
 
     return {
         "user_id": user_id,
@@ -1942,31 +2175,35 @@ def recommend_for_user(
                 "for this user"
             ),
 
-            "age": int(
-                profile["user_age"]
+            "age": _safe_int(
+                profile.get(
+                    "user_age"
+                )
             ),
 
-            "gender": profile[
-                "user_gender"
-            ],
+            "gender": _safe_string(
+                profile.get(
+                    "user_gender"
+                )
+            ),
 
-            "loyalty_score": float(
-                profile[
+            "loyalty_score": _safe_float(
+                profile.get(
                     "loyalty_score"
-                ]
+                )
             ),
 
-            "previous_purchase_count": int(
-                profile[
+            "previous_purchase_count": _safe_int(
+                profile.get(
                     "previous_purchase_count"
-                ]
+                )
             ),
 
             "avg_purchase_value": round(
-                float(
-                    profile[
+                _safe_float(
+                    profile.get(
                         "avg_purchase_value"
-                    ]
+                    )
                 ),
                 2,
             ),
