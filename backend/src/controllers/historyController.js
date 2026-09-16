@@ -2,6 +2,7 @@ const {
   getPurchaseHistoryByCustomer,
   getBrowsingHistoryByCustomer,
   recordProductView,
+  recordCustomerInteraction,
   getSavedProductsByCustomer,
   getSavedItemCountByCustomer,
   isProductSavedByCustomer,
@@ -115,9 +116,132 @@ const recordView = async (req, res) => {
   } catch (error) {
     console.error("Record product view error:", error);
 
+    if (error.statusCode === 404) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
     return res.status(500).json({
       success: false,
       message: "Failed to record product view",
+    });
+  }
+};
+
+// ============================================================
+// RECORD CUSTOMER INTERACTION
+// ============================================================
+
+/**
+ * Records customer behavior used by the recommendation engine.
+ *
+ * Supported interaction types:
+ *
+ * - click
+ * - add_to_cart
+ * - like
+ *
+ * The customer ID is taken from the authenticated JWT.
+ *
+ * Example request:
+ *
+ * POST /api/history/interaction
+ *
+ * {
+ *   "productId": "P105",
+ *   "interactionType": "add_to_cart"
+ * }
+ */
+
+const recordInteraction = async (req, res) => {
+  try {
+    const { productId, interactionType } = req.body;
+
+    // ----------------------------------------------------------
+    // Validate product ID
+    // ----------------------------------------------------------
+
+    if (!productId) {
+      return res.status(400).json({
+        success: false,
+        message: "Product ID is required",
+      });
+    }
+
+    // ----------------------------------------------------------
+    // Validate interaction type
+    // ----------------------------------------------------------
+
+    if (!interactionType) {
+      return res.status(400).json({
+        success: false,
+        message: "Interaction type is required",
+      });
+    }
+
+    const allowedInteractionTypes = ["click", "add_to_cart", "like"];
+
+    if (!allowedInteractionTypes.includes(interactionType)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid interaction type. Supported types: click, add_to_cart, like",
+      });
+    }
+
+    // ----------------------------------------------------------
+    // Record interaction
+    // ----------------------------------------------------------
+
+    const result = await recordCustomerInteraction(
+      req.customerId,
+      productId,
+      interactionType,
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Customer interaction recorded",
+      customerId: req.customerId,
+      productId,
+      interactionType,
+      interaction: result.interaction,
+      product: result.product,
+    });
+  } catch (error) {
+    console.error("Record customer interaction error:", error);
+
+    // --------------------------------------------------------
+    // Product not found
+    // --------------------------------------------------------
+
+    if (error.statusCode === 404) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    // --------------------------------------------------------
+    // Invalid interaction type
+    // --------------------------------------------------------
+
+    if (error.message?.startsWith("Invalid interaction type")) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    // --------------------------------------------------------
+    // Database / server error
+    // --------------------------------------------------------
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to record customer interaction",
     });
   }
 };
@@ -248,10 +372,15 @@ const toggleSaved = async (req, res) => {
   }
 };
 
+// ============================================================
+// EXPORTS
+// ============================================================
+
 module.exports = {
   getPurchaseHistory,
   getBrowsingHistory,
   recordView,
+  recordInteraction,
   getDashboardStats,
   getSavedProducts,
   getSavedStatus,
