@@ -18,7 +18,7 @@ const fetchRecommendationsFromMl = async (customerId) => {
         params: {
           top_k: 5,
         },
-        timeout: 20000,
+        timeout: 30000,
       },
     );
 
@@ -41,10 +41,151 @@ const fetchRecommendationsFromMl = async (customerId) => {
 
 // ============================================================
 // FIND BEST AVAILABLE PRODUCT
+//
+// ML gives category/brand information.
+// We map that recommendation to an ACTUAL product in the
+// PostgreSQL products table.
+//
+// Priority:
+// 1. Exact category + brand
+// 2. Same category
+// 3. Same brand
+// 4. Any available product
 // ============================================================
 
 const findBestProduct = async (category, brand, excludeProductIds = []) => {
-  const result = await pool.query(
+  const excludedIds =
+    excludeProductIds.length > 0 ? excludeProductIds.map(String) : null;
+
+  // ----------------------------------------------------------
+  // 1. EXACT CATEGORY + BRAND
+  // ----------------------------------------------------------
+
+  if (category && brand) {
+    const exactResult = await pool.query(
+      `
+      SELECT
+        id,
+        name,
+        description,
+        category,
+        brand,
+        price,
+        discount,
+        rating,
+        image_url AS image,
+        stock,
+        season
+      FROM products
+      WHERE LOWER(category) = LOWER($1)
+        AND LOWER(brand) = LOWER($2)
+        AND stock > 0
+        AND (
+          $3::text[] IS NULL
+          OR id <> ALL($3::text[])
+        )
+      ORDER BY
+        rating DESC NULLS LAST,
+        discount DESC NULLS LAST,
+        price ASC,
+        created_at DESC
+      LIMIT 1
+      `,
+      [String(category).trim(), String(brand).trim(), excludedIds],
+    );
+
+    if (exactResult.rows.length > 0) {
+      return exactResult.rows[0];
+    }
+  }
+
+  // ----------------------------------------------------------
+  // 2. SAME CATEGORY
+  // ----------------------------------------------------------
+
+  if (category) {
+    const categoryResult = await pool.query(
+      `
+      SELECT
+        id,
+        name,
+        description,
+        category,
+        brand,
+        price,
+        discount,
+        rating,
+        image_url AS image,
+        stock,
+        season
+      FROM products
+      WHERE LOWER(category) = LOWER($1)
+        AND stock > 0
+        AND (
+          $2::text[] IS NULL
+          OR id <> ALL($2::text[])
+        )
+      ORDER BY
+        rating DESC NULLS LAST,
+        discount DESC NULLS LAST,
+        price ASC,
+        created_at DESC
+      LIMIT 1
+      `,
+      [String(category).trim(), excludedIds],
+    );
+
+    if (categoryResult.rows.length > 0) {
+      return categoryResult.rows[0];
+    }
+  }
+
+  // ----------------------------------------------------------
+  // 3. SAME BRAND
+  // ----------------------------------------------------------
+
+  if (brand) {
+    const brandResult = await pool.query(
+      `
+      SELECT
+        id,
+        name,
+        description,
+        category,
+        brand,
+        price,
+        discount,
+        rating,
+        image_url AS image,
+        stock,
+        season
+      FROM products
+      WHERE LOWER(brand) = LOWER($1)
+        AND stock > 0
+        AND (
+          $2::text[] IS NULL
+          OR id <> ALL($2::text[])
+        )
+      ORDER BY
+        rating DESC NULLS LAST,
+        discount DESC NULLS LAST,
+        price ASC,
+        created_at DESC
+      LIMIT 1
+      `,
+      [String(brand).trim(), excludedIds],
+    );
+
+    if (brandResult.rows.length > 0) {
+      return brandResult.rows[0];
+    }
+  }
+
+  // ----------------------------------------------------------
+  // 4. FINAL FALLBACK
+  // ----------------------------------------------------------
+
+  const fallbackResult = await pool.query(
     `
     SELECT
       id,
@@ -59,28 +200,22 @@ const findBestProduct = async (category, brand, excludeProductIds = []) => {
       stock,
       season
     FROM products
-    WHERE LOWER(category) = LOWER($1)
-      AND LOWER(brand) = LOWER($2)
-      AND stock > 0
+    WHERE stock > 0
       AND (
-        $3::text[] IS NULL
-        OR id <> ALL($3::text[])
+        $1::text[] IS NULL
+        OR id <> ALL($1::text[])
       )
     ORDER BY
-      discount DESC NULLS LAST,
       rating DESC NULLS LAST,
+      discount DESC NULLS LAST,
       price ASC,
       created_at DESC
     LIMIT 1
     `,
-    [
-      String(category || "").trim(),
-      String(brand || "").trim(),
-      excludeProductIds.length > 0 ? excludeProductIds.map(String) : null,
-    ],
+    [excludedIds],
   );
 
-  return result.rows[0] || null;
+  return fallbackResult.rows[0] || null;
 };
 
 // ============================================================
@@ -98,6 +233,67 @@ const getLatestRecommendationCreatedAt = async (customerId) => {
   );
 
   return result.rows[0]?.latest_created_at || null;
+};
+
+// ============================================================
+// GET LATEST CUSTOMER INTERACTION TIME
+//
+// IMPORTANT:
+// This includes:
+// - view
+// - click
+// - add_to_cart
+// - like
+//
+// This is what makes recommendations refresh after the user
+// actually interacts with products.
+// ============================================================
+
+const getLatestInteractionAt = async (customerId) => {
+  const result = await pool.query(
+    `
+    SELECT MAX(timestamp) AS latest_interaction_at
+    FROM customer_interactions
+    WHERE customer_id = $1
+    `,
+    [customerId],
+  );
+
+  return result.rows[0]?.latest_interaction_at || null;
+};
+
+// ============================================================
+// GET LATEST BROWSING TIME
+// ============================================================
+
+const getLatestBrowsingAt = async (customerId) => {
+  const result = await pool.query(
+    `
+    SELECT MAX(viewed_at) AS latest_browsing_at
+    FROM browsing_history
+    WHERE customer_id = $1
+    `,
+    [customerId],
+  );
+
+  return result.rows[0]?.latest_browsing_at || null;
+};
+
+// ============================================================
+// GET LATEST PURCHASE TIME
+// ============================================================
+
+const getLatestPurchaseAt = async (customerId) => {
+  const result = await pool.query(
+    `
+    SELECT MAX(purchased_at) AS latest_purchase_at
+    FROM purchases
+    WHERE customer_id = $1
+    `,
+    [customerId],
+  );
+
+  return result.rows[0]?.latest_purchase_at || null;
 };
 
 // ============================================================
@@ -119,29 +315,91 @@ const getLatestFeedbackCreatedAt = async (customerId) => {
 
 // ============================================================
 // CHECK WHETHER RECOMMENDATIONS NEED REFRESHING
+//
+// Recommendations are refreshed when:
+// 1. No recommendation exists.
+// 2. New customer interaction exists.
+// 3. New browsing event exists.
+// 4. New purchase exists.
+// 5. New recommendation feedback exists.
+//
+// This is the critical fix.
 // ============================================================
 
 const recommendationsNeedRefresh = async (customerId) => {
   const latestRecommendation =
     await getLatestRecommendationCreatedAt(customerId);
 
-  const latestFeedback = await getLatestFeedbackCreatedAt(customerId);
+  // ----------------------------------------------------------
+  // No recommendations at all
+  // ----------------------------------------------------------
 
-  // No recommendations yet.
   if (!latestRecommendation) {
+    console.log(
+      `[RECOMMENDATION] No existing recommendations for ${customerId}. Generating...`,
+    );
+
     return true;
   }
 
-  // No feedback yet.
-  if (!latestFeedback) {
+  const [latestInteraction, latestBrowsing, latestPurchase, latestFeedback] =
+    await Promise.all([
+      getLatestInteractionAt(customerId),
+      getLatestBrowsingAt(customerId),
+      getLatestPurchaseAt(customerId),
+      getLatestFeedbackCreatedAt(customerId),
+    ]);
+
+  const recommendationTime = new Date(latestRecommendation).getTime();
+
+  const activityTimes = [
+    latestInteraction,
+    latestBrowsing,
+    latestPurchase,
+    latestFeedback,
+  ]
+    .filter(Boolean)
+    .map((date) => new Date(date).getTime());
+
+  // ----------------------------------------------------------
+  // No customer activity after recommendation generation
+  // ----------------------------------------------------------
+
+  if (activityTimes.length === 0) {
     return false;
   }
 
-  // New feedback exists after the latest recommendation.
-  return (
-    new Date(latestFeedback).getTime() >
-    new Date(latestRecommendation).getTime()
-  );
+  // ----------------------------------------------------------
+  // Find the most recent customer activity
+  // ----------------------------------------------------------
+
+  const latestActivity = Math.max(...activityTimes);
+
+  // ----------------------------------------------------------
+  // New activity after recommendation generation
+  // ----------------------------------------------------------
+
+  if (latestActivity > recommendationTime) {
+    console.log(
+      `[RECOMMENDATION] New customer activity detected for ${customerId}.`,
+    );
+
+    console.log(
+      `[RECOMMENDATION] Recommendation time: ${new Date(
+        recommendationTime,
+      ).toISOString()}`,
+    );
+
+    console.log(
+      `[RECOMMENDATION] Latest activity time: ${new Date(
+        latestActivity,
+      ).toISOString()}`,
+    );
+
+    return true;
+  }
+
+  return false;
 };
 
 // ============================================================
@@ -154,11 +412,19 @@ const saveRecommendationsForCustomer = async (
   modelVersion = DEFAULT_MODEL_VERSION,
 ) => {
   if (!Array.isArray(mlRecommendations) || mlRecommendations.length === 0) {
+    console.log(
+      `[RECOMMENDATION] ML returned no recommendations for ${customerId}`,
+    );
+
     return [];
   }
 
   const rows = [];
   const usedProductIds = new Set();
+
+  // ----------------------------------------------------------
+  // Convert ML recommendations into real website products
+  // ----------------------------------------------------------
 
   for (const recommendation of mlRecommendations) {
     const product = await findBestProduct(
@@ -168,25 +434,43 @@ const saveRecommendationsForCustomer = async (
     );
 
     if (!product) {
+      console.warn(
+        `[RECOMMENDATION] No available product found for category=${recommendation.category}, brand=${recommendation.brand}`,
+      );
+
       continue;
     }
 
-    if (usedProductIds.has(String(product.id))) {
+    const productId = String(product.id);
+
+    if (usedProductIds.has(productId)) {
       continue;
     }
 
-    usedProductIds.add(String(product.id));
+    usedProductIds.add(productId);
+
+    // --------------------------------------------------------
+    // ML score
+    // --------------------------------------------------------
 
     const score = Number(
       recommendation.final_score ??
         recommendation.affinity_score ??
         recommendation.score ??
+        recommendation.cold_start_score ??
         0,
     );
 
+    // --------------------------------------------------------
+    // Explanation
+    // --------------------------------------------------------
+
     const explanation =
       recommendation.explanation ||
-      `Recommended ${product.name} because it matches your preferences.`;
+      recommendation.reason ||
+      (recommendation.recommendation_type === "cold_start"
+        ? `Recommended ${product.name} because it is highly rated and currently available.`
+        : `Recommended ${product.name} because it matches your recent shopping behavior.`);
 
     rows.push({
       customer_id: customerId,
@@ -208,11 +492,11 @@ const saveRecommendationsForCustomer = async (
   // ----------------------------------------------------------
   // IMPORTANT:
   //
-  // All rows in this INSERT receive the same PostgreSQL NOW()
-  // timestamp. This creates one recommendation generation batch.
+  // DO NOT DELETE OLD RECOMMENDATIONS.
   //
-  // Old recommendations are NOT deleted.
-  // Therefore recommendation_feedback remains intact.
+  // recommendation_feedback references recommendations.
+  // Deleting old recommendations can delete their feedback
+  // through the FK cascade.
   // ----------------------------------------------------------
 
   const query = `
@@ -259,6 +543,10 @@ const saveRecommendationsForCustomer = async (
 
   const result = await pool.query(query, values);
 
+  console.log(
+    `[RECOMMENDATION] Saved ${result.rows.length} recommendations for ${customerId}`,
+  );
+
   return result.rows;
 };
 
@@ -267,17 +555,31 @@ const saveRecommendationsForCustomer = async (
 // ============================================================
 
 const generateRecommendationsForCustomer = async (customerId) => {
+  console.log(
+    `[RECOMMENDATION] Requesting fresh recommendations from ML for ${customerId}`,
+  );
+
   const mlResponse = await fetchRecommendationsFromMl(customerId);
 
   const recommendations = mlResponse?.recommendations || [];
 
   const modelVersion = mlResponse?.model_version || DEFAULT_MODEL_VERSION;
 
-  return saveRecommendationsForCustomer(
+  console.log(
+    `[RECOMMENDATION] ML returned ${recommendations.length} recommendations`,
+  );
+
+  console.log(
+    `[RECOMMENDATION] Type: ${mlResponse?.recommendation_type || "unknown"}`,
+  );
+
+  const saved = await saveRecommendationsForCustomer(
     customerId,
     recommendations,
     modelVersion,
   );
+
+  return saved;
 };
 
 // ============================================================
@@ -309,7 +611,7 @@ const getRecommendationsByCustomer = async (customerId) => {
 
     FROM recommendations r
 
-    LEFT JOIN products p
+    INNER JOIN products p
       ON p.id = r.product_id
 
     WHERE r.customer_id = $1
@@ -334,20 +636,52 @@ const getRecommendationsByCustomer = async (customerId) => {
 
 // ============================================================
 // GET RECOMMENDATIONS WITH AUTOMATIC REFRESH
+//
+// Every time the frontend requests recommendations:
+// 1. Check latest recommendation timestamp.
+// 2. Check latest user activity.
+// 3. If user has interacted after recommendation generation,
+//    call ML again.
+// 4. Save a new recommendation batch.
+// 5. Return the newest batch.
+//
+// This means the recommendation list can evolve as the user
+// browses and shops.
 // ============================================================
 
 const getOrRefreshRecommendations = async (customerId) => {
-  const needsRefresh = await recommendationsNeedRefresh(customerId);
+  try {
+    const needsRefresh = await recommendationsNeedRefresh(customerId);
 
-  if (needsRefresh) {
-    const generated = await generateRecommendationsForCustomer(customerId);
+    if (needsRefresh) {
+      console.log(
+        `[RECOMMENDATION] Refreshing recommendations for ${customerId}`,
+      );
 
-    if (generated.length > 0) {
-      return getRecommendationsByCustomer(customerId);
+      const generated = await generateRecommendationsForCustomer(customerId);
+
+      if (generated.length > 0) {
+        console.log(
+          `[RECOMMENDATION] New recommendation batch generated for ${customerId}`,
+        );
+
+        return getRecommendationsByCustomer(customerId);
+      }
+
+      console.warn(
+        `[RECOMMENDATION] ML did not generate recommendations for ${customerId}`,
+      );
     }
-  }
 
-  return getRecommendationsByCustomer(customerId);
+    return getRecommendationsByCustomer(customerId);
+  } catch (error) {
+    console.error(
+      `[RECOMMENDATION] Failed to get/refresh recommendations for ${customerId}:`,
+      error.response?.data || error.message || error,
+    );
+
+    throw error;
+  }
 };
 
 // ============================================================
@@ -363,7 +697,7 @@ const saveRecommendationFeedback = async ({
   const action = feedback === "helpful" ? "helpful" : "not_helpful";
 
   // ----------------------------------------------------------
-  // Validate recommendation ownership.
+  // Validate recommendation ownership
   // ----------------------------------------------------------
 
   if (recommendationId) {
@@ -391,7 +725,7 @@ const saveRecommendationFeedback = async ({
   }
 
   // ----------------------------------------------------------
-  // Save feedback.
+  // Save feedback
   // ----------------------------------------------------------
 
   const result = await pool.query(
@@ -418,6 +752,10 @@ const saveRecommendationFeedback = async ({
     [customerId, recommendationId, productId, action],
   );
 
+  console.log(
+    `[RECOMMENDATION] Feedback saved: customer=${customerId}, product=${productId}, action=${action}`,
+  );
+
   return result.rows[0];
 };
 
@@ -435,4 +773,7 @@ module.exports = {
   saveRecommendationsForCustomer,
 
   saveRecommendationFeedback,
+
+  // Exported for testing/debugging if needed.
+  recommendationsNeedRefresh,
 };
