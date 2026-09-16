@@ -6,8 +6,10 @@ import "../index.css";
 import Navbar from "../components/Navbar";
 import Sidebar from "../components/Sidebar";
 import { getProductById } from "../services/productService";
+
 import {
   recordProductView,
+  recordCustomerInteraction,
   getSavedProductStatus,
   toggleSavedProduct,
 } from "../services/historyService";
@@ -28,14 +30,10 @@ function ProductDetails() {
   const [saved, setSaved] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
 
+  const [cartLoading, setCartLoading] = useState(false);
+
   // ============================================================
   // PRODUCT VIEW TRACKING
-  // ============================================================
-  // Prevents the same product view from being recorded twice
-  // when React Strict Mode re-runs effects during development.
-  //
-  // The key contains both customer ID and product ID so that
-  // changing to another product still records a new view.
   // ============================================================
 
   const viewRecordedRef = useRef(null);
@@ -96,16 +94,10 @@ function ProductDetails() {
 
     const viewKey = `${customer.id}:${id}`;
 
-    // ----------------------------------------------------------
-    // Prevent duplicate recording
-    // ----------------------------------------------------------
-
     if (viewRecordedRef.current === viewKey) {
       return;
     }
 
-    // Mark this customer/product combination as recorded
-    // before making the request.
     viewRecordedRef.current = viewKey;
 
     const recordView = async () => {
@@ -115,13 +107,10 @@ function ProductDetails() {
           duration: 0,
         });
 
-        // Notify Dashboard that a new view was recorded.
         window.dispatchEvent(new Event("dashboardStatsUpdated"));
       } catch (err) {
-        // If the API request failed, allow a retry.
         viewRecordedRef.current = null;
 
-        // Viewing a product should never break the page.
         console.error("Failed to record product view:", err);
       }
     };
@@ -146,8 +135,6 @@ function ProductDetails() {
       } catch (err) {
         console.error("Failed to load saved status:", err);
 
-        // If the status cannot be loaded,
-        // keep the default unsaved state.
         setSaved(false);
       }
     };
@@ -163,10 +150,6 @@ function ProductDetails() {
     if (!product) {
       return;
     }
-
-    // ----------------------------------------------------------
-    // Require authentication
-    // ----------------------------------------------------------
 
     if (!customer?.id) {
       navigate("/login", {
@@ -192,10 +175,25 @@ function ProductDetails() {
       setSaved(newSavedState);
 
       // --------------------------------------------------------
-      // Notify Dashboard
+      // Record LIKE only when the product is saved.
       // --------------------------------------------------------
 
+      if (newSavedState) {
+        try {
+          await recordCustomerInteraction({
+            productId: id,
+            interactionType: "like",
+          });
+        } catch (interactionError) {
+          // Do not undo the save if interaction tracking fails.
+          console.error("Failed to record like interaction:", interactionError);
+        }
+      }
+
       window.dispatchEvent(new Event("dashboardStatsUpdated"));
+
+      // Tell recommendation components that customer behavior changed.
+      window.dispatchEvent(new Event("recommendationsUpdated"));
     } catch (err) {
       console.error("Failed to save product:", err);
 
@@ -214,12 +212,61 @@ function ProductDetails() {
   // ADD TO CART
   // ============================================================
 
-  const handleAddToCart = () => {
+  const handleAddToCart = async () => {
     if (!product) {
       return;
     }
 
-    alert(`${product.name} has been added to your cart.`);
+    // ----------------------------------------------------------
+    // Require authentication
+    // ----------------------------------------------------------
+
+    if (!customer?.id) {
+      navigate("/login", {
+        state: {
+          from: `/product/${id}`,
+        },
+      });
+
+      return;
+    }
+
+    if (cartLoading || isOutOfStock) {
+      return;
+    }
+
+    try {
+      setCartLoading(true);
+
+      // --------------------------------------------------------
+      // Record ADD TO CART interaction
+      // --------------------------------------------------------
+
+      await recordCustomerInteraction({
+        productId: id,
+        interactionType: "add_to_cart",
+      });
+
+      // --------------------------------------------------------
+      // Notify recommendation/dashboard components
+      // --------------------------------------------------------
+
+      window.dispatchEvent(new Event("recommendationsUpdated"));
+      window.dispatchEvent(new Event("dashboardStatsUpdated"));
+
+      alert(`${product.name} has been added to your cart.`);
+    } catch (err) {
+      console.error("Failed to record add-to-cart interaction:", err);
+
+      const message =
+        err?.response?.data?.message ||
+        err?.message ||
+        "Unable to add product to cart.";
+
+      alert(message);
+    } finally {
+      setCartLoading(false);
+    }
   };
 
   // ============================================================
@@ -369,13 +416,9 @@ function ProductDetails() {
             ================================================== */}
 
             <div className="product-details-info">
-              {/* CATEGORY */}
-
               <span className="product-details-category">
                 {product.category || "Product"}
               </span>
-
-              {/* PRODUCT NAME */}
 
               <h1>{product.name}</h1>
 
@@ -443,12 +486,12 @@ function ProductDetails() {
                   type="button"
                   className="primary-button"
                   onClick={handleAddToCart}
-                  disabled={isOutOfStock}
+                  disabled={isOutOfStock || cartLoading}
                 >
-                  🛒 Add to Cart
+                  {cartLoading ? "Adding..." : "🛒 Add to Cart"}
                 </button>
 
-                {/* SAVE */}
+                {/* SAVE / LIKE */}
 
                 <button
                   type="button"
@@ -492,15 +535,11 @@ function ProductDetails() {
             <h2>Product Information</h2>
 
             <div className="product-info-grid">
-              {/* CATEGORY */}
-
               <div className="product-info-item">
                 <span>Category</span>
 
                 <strong>{product.category || "Not available"}</strong>
               </div>
-
-              {/* PRICE */}
 
               <div className="product-info-item">
                 <span>Price</span>
@@ -508,15 +547,11 @@ function ProductDetails() {
                 <strong>₹{formatPrice(product.price)}</strong>
               </div>
 
-              {/* RATING */}
-
               <div className="product-info-item">
                 <span>Rating</span>
 
                 <strong>⭐ {formatRating(product.rating)}</strong>
               </div>
-
-              {/* STOCK */}
 
               {hasStockInformation && (
                 <div className="product-info-item">
@@ -525,8 +560,6 @@ function ProductDetails() {
                   <strong>{isInStock ? "In Stock" : "Out of Stock"}</strong>
                 </div>
               )}
-
-              {/* SEASON */}
 
               {product.season && (
                 <div className="product-info-item">
