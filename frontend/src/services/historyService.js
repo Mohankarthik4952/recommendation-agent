@@ -56,12 +56,20 @@ export const getBrowsingHistory = async (customerId) => {
   }
 };
 
+// ============================================================
+// PRODUCT VIEW
+// ============================================================
+
 /**
  * Record product view
  *
  * POST /api/history/view
  *
  * The authenticated customer is taken from the JWT.
+ *
+ * This records the view in:
+ * 1. browsing_history
+ * 2. customer_interactions
  */
 export const recordProductView = async ({ productId, duration = 0 }) => {
   if (!productId) {
@@ -78,6 +86,70 @@ export const recordProductView = async ({ productId, duration = 0 }) => {
   } catch (error) {
     console.error(
       `Failed to record product view for ${productId}:`,
+      error.response?.data?.message || error.message,
+    );
+
+    throw error;
+  }
+};
+
+// ============================================================
+// CUSTOMER INTERACTION
+// ============================================================
+
+/**
+ * Record a customer interaction for the recommendation engine.
+ *
+ * POST /api/history/interaction
+ *
+ * Supported interaction types:
+ *
+ * - view
+ * - click
+ * - add_to_cart
+ * - like
+ *
+ * The authenticated customer is taken from the JWT.
+ *
+ * Example:
+ *
+ * {
+ *   productId: "P105",
+ *   interactionType: "add_to_cart"
+ * }
+ */
+export const recordCustomerInteraction = async ({
+  productId,
+  interactionType,
+}) => {
+  if (!productId) {
+    throw new Error("Product ID is required");
+  }
+
+  if (!interactionType) {
+    throw new Error("Interaction type is required");
+  }
+
+  const allowedInteractionTypes = ["view", "click", "add_to_cart", "like"];
+
+  if (!allowedInteractionTypes.includes(interactionType)) {
+    throw new Error(
+      `Invalid interaction type. Supported types: ${allowedInteractionTypes.join(
+        ", ",
+      )}`,
+    );
+  }
+
+  try {
+    const response = await api.post("/history/interaction", {
+      productId,
+      interactionType,
+    });
+
+    return response.data;
+  } catch (error) {
+    console.error(
+      `Failed to record ${interactionType} interaction for ${productId}:`,
       error.response?.data?.message || error.message,
     );
 
