@@ -62,7 +62,15 @@ const getBrowsingHistoryByCustomer = async (customerId) => {
 // ============================================================
 
 const recordProductView = async (customerId, productId, duration = 0) => {
-  const result = await pool.query(
+  const durationSeconds = Number.isFinite(Number(duration))
+    ? Number(duration)
+    : 0;
+
+  // ----------------------------------------------------------
+  // 1. Record in browsing_history
+  // ----------------------------------------------------------
+
+  const browsingResult = await pool.query(
     `
     INSERT INTO browsing_history
     (
@@ -85,14 +93,161 @@ const recordProductView = async (customerId, productId, duration = 0) => {
       viewed_at,
       duration_seconds
     `,
+    [customerId, productId, durationSeconds],
+  );
+
+  // ----------------------------------------------------------
+  // 2. Record in customer_interactions
+  // ----------------------------------------------------------
+  // The recommendation engine reads customer_interactions.
+  // Therefore every product view must also be recorded there.
+  // ----------------------------------------------------------
+
+  await pool.query(
+    `
+    INSERT INTO customer_interactions
+    (
+      customer_id,
+      product_id,
+      timestamp,
+      interaction_type
+    )
+    VALUES
+    (
+      $1,
+      $2,
+      NOW(),
+      'view'
+    )
+    `,
+    [customerId, productId],
+  );
+
+  return browsingResult.rows[0];
+};
+
+// ============================================================
+// RECORD CUSTOMER INTERACTION
+// ============================================================
+
+/**
+ * Record a customer interaction for the recommendation engine.
+ *
+ * Supported interaction types:
+ *
+ *   view
+ *   click
+ *   add_to_cart
+ *   like
+ *
+ * Product information is automatically retrieved from the
+ * products table and stored along with the interaction.
+ */
+
+const recordCustomerInteraction = async (
+  customerId,
+  productId,
+  interactionType,
+) => {
+  // ----------------------------------------------------------
+  // Validate interaction type
+  // ----------------------------------------------------------
+
+  const allowedInteractionTypes = ["view", "click", "add_to_cart", "like"];
+
+  if (!allowedInteractionTypes.includes(interactionType)) {
+    throw new Error(
+      `Invalid interaction type. Supported types: ${allowedInteractionTypes.join(
+        ", ",
+      )}`,
+    );
+  }
+
+  // ----------------------------------------------------------
+  // Validate product exists
+  // ----------------------------------------------------------
+
+  const productResult = await pool.query(
+    `
+    SELECT
+      id,
+      category,
+      brand,
+      price,
+      discount,
+      rating
+    FROM products
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [productId],
+  );
+
+  if (productResult.rows.length === 0) {
+    const error = new Error("Product not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const product = productResult.rows[0];
+
+  // ----------------------------------------------------------
+  // Insert interaction
+  // ----------------------------------------------------------
+
+  const result = await pool.query(
+    `
+    INSERT INTO customer_interactions
+    (
+      customer_id,
+      product_id,
+      timestamp,
+      interaction_type,
+      price,
+      discount,
+      rating
+    )
+    VALUES
+    (
+      $1,
+      $2,
+      NOW(),
+      $3,
+      $4,
+      $5,
+      $6
+    )
+    RETURNING
+      id,
+      customer_id,
+      product_id,
+      timestamp,
+      interaction_type,
+      price,
+      discount,
+      rating
+    `,
     [
       customerId,
       productId,
-      Number.isFinite(Number(duration)) ? Number(duration) : 0,
+      interactionType,
+      product.price,
+      product.discount || 0,
+      product.rating,
     ],
   );
 
-  return result.rows[0];
+  return {
+    interaction: result.rows[0],
+    product: {
+      product_id: product.id,
+      category: product.category,
+      brand: product.brand,
+      price: Number(product.price || 0),
+      discount: Number(product.discount || 0),
+      rating: product.rating !== null ? Number(product.rating) : null,
+    },
+  };
 };
 
 // ============================================================
@@ -276,7 +431,9 @@ const getDashboardStatsByCustomer = async (customerId) => {
 
   return {
     products_viewed: Number(row.products_viewed || 0),
+
     saved_items: Number(row.saved_items || 0),
+
     purchases: Number(row.purchases || 0),
   };
 };
@@ -286,10 +443,19 @@ const getDashboardStatsByCustomer = async (customerId) => {
 // ============================================================
 
 module.exports = {
+  // Purchase history
   getPurchaseHistoryByCustomer,
+
+  // Browsing history
   getBrowsingHistoryByCustomer,
+
+  // Product view
   recordProductView,
 
+  // Customer interaction
+  recordCustomerInteraction,
+
+  // Saved products
   getSavedProductsByCustomer,
   getSavedItemCountByCustomer,
   isProductSavedByCustomer,
@@ -297,5 +463,6 @@ module.exports = {
   removeSavedProductForCustomer,
   toggleSavedProduct,
 
+  // Dashboard
   getDashboardStatsByCustomer,
 };
